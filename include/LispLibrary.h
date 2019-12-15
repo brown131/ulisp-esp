@@ -1,5 +1,5 @@
  
-const char LispLibrary[] =
+const char LispLibrary[] PROGMEM = 
 "(defun last (x) (nth (- (length x) 1) x))"
 "(defun filter (fn lst) (mapcan (lambda (x) (when (fn x) (list x))) lst))"
 "(defun remove (fn lst) (mapcan (lambda (x) (unless (fn x) (list x))) lst))"

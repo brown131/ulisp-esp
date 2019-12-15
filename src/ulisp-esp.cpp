@@ -23,12 +23,15 @@
 #include <Wire.h>
 #include <limits.h>
 #include <EEPROM.h>
+#include <alloc/spiram_alloc.h>
 #if defined (ESP8266)
   #include <ESP8266WiFi.h>
 #elif defined (ESP32)
   #include <WiFi.h>
 #endif
 #include "LispLibrary.h"
+
+using namespace virtmem;
 
 #if defined(sdcardsupport)
   #include <SD.h>
