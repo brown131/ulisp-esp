@@ -12,7 +12,7 @@
 // #define resetautorun
 #define printfreespace
 #define serialmonitor
-// #define printgcs
+#define printgcs
 // #define sdcardsupport
 #define lisplibrary
 
@@ -23,9 +23,9 @@
 #include <Wire.h>
 #include <limits.h>
 #include <EEPROM.h>
-#include <alloc/spiram_alloc.h>
+#include <spiffs_alloc.h>
 #if defined (ESP8266)
-  //#include <ESP8266WiFi.h>
+  #include <ESP8266WiFi.h>
   #include <FS.h>
 #elif defined (ESP32)
   #include <WiFi.h>
@@ -45,10 +45,11 @@ using namespace virtmem;
 // C Macros
 
 #define nil                Null
-#define car(x)             (((VPtr<object, SPIRAMVAlloc>) (x))->ptr.car)
-#define cdr(x)             (((VPtr<object, SPIRAMVAlloc>) (x))->ptr.cdr)
+#define objectvptr         VPtr<object, valloc_t>
+#define car(x)             (((objectvptr) (x))->ptr.car)
+#define cdr(x)             (((objectvptr) (x))->ptr.cdr)
 
-#define first(x)           (((VPtr<object, SPIRAMVAlloc>) (x))->ptr.car)
+#define first(x)           (((objectvptr) (x))->ptr.car)
 #define second(x)          (car(cdr(x)))
 #define cddr(x)            (cdr(cdr(x)))
 #define third(x)           (car(cdr(cdr(x))))
@@ -98,13 +99,15 @@ AVAILABLE, WIFISERVER, WIFISOFTAP, CONNECTED, WIFILOCALIP, WIFICONNECT, ENDFUNCT
 
 // Typedefs
 
+typedef SPIFFSVAlloc valloc_t;
+
 typedef unsigned int symbol_t;
 
 typedef struct sobject {
   union {
     struct {
-      VPtr<sobject, SPIRAMVAlloc> car;
-      VPtr<sobject, SPIRAMVAlloc> cdr;
+      VPtr<sobject, valloc_t> car;
+      VPtr<sobject, valloc_t> cdr;
     } ptr;
     struct {
       unsigned int type;
@@ -117,7 +120,7 @@ typedef struct sobject {
   };
 } object;
 
-typedef VPtr<object, SPIRAMVAlloc>(*fn_ptr_type)(VPtr<object, SPIRAMVAlloc>, VPtr<object, SPIRAMVAlloc>);
+typedef objectvptr(*fn_ptr_type)(objectvptr, objectvptr);
 
 typedef struct {
   const char *string;
@@ -131,6 +134,7 @@ typedef void (*pfun_t)(char);
 typedef int PinMode;
 
 // Workspace
+#define POOLSIZE (1024 * 128)
 #define WORDALIGNED __attribute__((aligned (4)))
 #define BUFFERSIZE 34  // Number of bits+2
 
@@ -153,55 +157,55 @@ typedef int PinMode;
 
 #endif
 
-VPtr<object, SPIRAMVAlloc> Workspace[WORKSPACESIZE] WORDALIGNED;
+objectvptr Workspace[WORKSPACESIZE] WORDALIGNED;
 char SymbolTable[SYMBOLTABLESIZE];
 
 // Global variables
 
-SPIRAMVAlloc valloc;
-VPtr<object, SPIRAMVAlloc> Null = VPtr<object, SPIRAMVAlloc> { };
+SPIFFSVAlloc valloc(POOLSIZE);
+objectvptr Null = objectvptr { };
 jmp_buf exception;
 unsigned int Freespace = 0;
-VPtr<object, SPIRAMVAlloc> Freelist;
+objectvptr Freelist;
 char *SymbolTop = SymbolTable;
 unsigned int I2CCount;
 unsigned int TraceFn[TRACEMAX];
 unsigned int TraceDepth[TRACEMAX];
 
-VPtr<object, SPIRAMVAlloc> GlobalEnv;
-VPtr<object, SPIRAMVAlloc> GCStack;
-VPtr<object, SPIRAMVAlloc> GlobalString;
+objectvptr GlobalEnv;
+objectvptr GCStack;
+objectvptr GlobalString;
 int GlobalStringIndex = 0;
 char BreakLevel = 0;
 char LastChar = 0;
 char LastPrint = 0;
 
-VPtr<object, SPIRAMVAlloc> BRAToken = VPtr<object, SPIRAMVAlloc>();
-VPtr<object, SPIRAMVAlloc> KETToken = VPtr<object, SPIRAMVAlloc>();
-VPtr<object, SPIRAMVAlloc> QUOToken = VPtr<object, SPIRAMVAlloc>();
-VPtr<object, SPIRAMVAlloc> DOTToken = VPtr<object, SPIRAMVAlloc>();
+objectvptr BRAToken = objectvptr();
+objectvptr KETToken = objectvptr();
+objectvptr QUOToken = objectvptr();
+objectvptr DOTToken = objectvptr();
 
 // Flags
 enum flag { PRINTREADABLY, RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED, NOESC };
 volatile char Flags = 0b00001; // PRINTREADABLY set by default
 
 // Forward references
-VPtr<object, SPIRAMVAlloc> tee;
-VPtr<object, SPIRAMVAlloc> tf_progn (VPtr<object, SPIRAMVAlloc> form, VPtr<object, SPIRAMVAlloc> env);
-VPtr<object, SPIRAMVAlloc> eval (VPtr<object, SPIRAMVAlloc> form, VPtr<object, SPIRAMVAlloc> env);
-VPtr<object, SPIRAMVAlloc> read ();
-void repl(VPtr<object, SPIRAMVAlloc> env);
-void printobject (VPtr<object, SPIRAMVAlloc> form, pfun_t pfun);
+objectvptr tee;
+objectvptr tf_progn (objectvptr form, objectvptr env);
+objectvptr eval (objectvptr form, objectvptr env);
+objectvptr read ();
+void repl(objectvptr env);
+void printobject (objectvptr form, pfun_t pfun);
 char *lookupbuiltin (symbol_t name);
 intptr_t lookupfn (symbol_t name);
 int builtin (char* n);
-void error (symbol_t fname, PGM_P string, VPtr<object, SPIRAMVAlloc> symbol);
+void error (symbol_t fname, PGM_P string, objectvptr symbol);
 void error2 (symbol_t fname, PGM_P string);
 
 inline int maxbuffer (char *buffer);
-char nthchar (VPtr<object, SPIRAMVAlloc> string, int n);
-boolean listp (VPtr<object, SPIRAMVAlloc> x);
-VPtr<object, SPIRAMVAlloc> apply (symbol_t name, VPtr<object, SPIRAMVAlloc> function, VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env);
+char nthchar (objectvptr string, int n);
+boolean listp (objectvptr x);
+objectvptr apply (symbol_t name, objectvptr function, objectvptr args, objectvptr env);
 void pserial (char c);
 void pfl (pfun_t pfun);
 void pfstring (const char *s, pfun_t pfun);
@@ -209,20 +213,20 @@ char *symbolname (symbol_t x);
 void pln (pfun_t pfun);
 void pstring (char *s, pfun_t pfun);
 char *lookupsymbol (symbol_t name) ;
-int listlength (symbol_t name, VPtr<object, SPIRAMVAlloc> list);
+int listlength (symbol_t name, objectvptr list);
 uint8_t lookupmin (symbol_t name);
 uint8_t lookupmax (symbol_t name);
-char *cstring (VPtr<object, SPIRAMVAlloc> form, char *buffer, int buflen);
+char *cstring (objectvptr form, char *buffer, int buflen);
 void pint (int i, pfun_t pfun);
 void testescape ();
 int gserial ();
-VPtr<object, SPIRAMVAlloc> read (gfun_t gfun);
+objectvptr read (gfun_t gfun);
 void deletesymbol (symbol_t name);
-void printstring (VPtr<object, SPIRAMVAlloc> form, pfun_t pfun);
-VPtr<object, SPIRAMVAlloc> edit (VPtr<object, SPIRAMVAlloc> fun);
-void superprint (VPtr<object, SPIRAMVAlloc> form, int lm, pfun_t pfun);
-void supersub (VPtr<object, SPIRAMVAlloc> form, int lm, int super, pfun_t pfun);
-int subwidthlist (VPtr<object, SPIRAMVAlloc> form, int w);
+void printstring (objectvptr form, pfun_t pfun);
+objectvptr edit (objectvptr fun);
+void superprint (objectvptr form, int lm, pfun_t pfun);
+void supersub (objectvptr form, int lm, int super, pfun_t pfun);
+int subwidthlist (objectvptr form, int w);
 int glibrary ();
 
 // Set up workspace
@@ -231,23 +235,24 @@ void initworkspace () {
   Freelist = nil;
   for (int i=WORKSPACESIZE-1; i>=0; i--) {
     Workspace[i] = valloc.alloc<object>();
-    object obj = *Workspace[i];
-    obj.ptr.car = nil;
-    obj.ptr.cdr = Freelist;
+    objectvptr obj = Workspace[i];
+    //Serial.println(obj.getRawNum());
+    car(obj) = nil;
+    cdr(obj) = Freelist;
     Freelist = Workspace[i];
     Freespace++;
   }
 }
 
-VPtr<object, SPIRAMVAlloc> myalloc () {
+objectvptr myalloc () {
   if (Freespace == 0) error2(0, PSTR("no room"));
-  VPtr<object, SPIRAMVAlloc> temp = Freelist;
+  objectvptr temp = Freelist;
   Freelist = cdr(Freelist);
   Freespace--;
   return temp;
 }
 
-inline void myfree (VPtr<object, SPIRAMVAlloc> obj) {
+inline void myfree (objectvptr obj) {
   car(obj) = nil;
   cdr(obj) = Freelist;
   Freelist = obj;
@@ -256,51 +261,51 @@ inline void myfree (VPtr<object, SPIRAMVAlloc> obj) {
 
 // Make each type of object
 
-VPtr<object, SPIRAMVAlloc> number (int n) {
-  VPtr<object, SPIRAMVAlloc> ptr = myalloc();
+objectvptr number (int n) {
+  objectvptr ptr = myalloc();
   ptr->val.type = NUMBER;
   ptr->val.integer = n;
   return ptr;
 }
 
-VPtr<object, SPIRAMVAlloc> makefloat (float f) {
-  VPtr<object, SPIRAMVAlloc> ptr = myalloc();
+objectvptr makefloat (float f) {
+  objectvptr ptr = myalloc();
   ptr->val.type = FLOAT;
   ptr->val.single_float = f;
   return ptr;
 }
 
-VPtr<object, SPIRAMVAlloc> character (char c) {
-  VPtr<object, SPIRAMVAlloc> ptr = myalloc();
+objectvptr character (char c) {
+  objectvptr ptr = myalloc();
   ptr->val.type = CHARACTER;
   ptr->val.integer = c;
   return ptr;
 }
 
-VPtr<object, SPIRAMVAlloc> cons (VPtr<object, SPIRAMVAlloc> arg1, VPtr<object, SPIRAMVAlloc> arg2) {
-  VPtr<object, SPIRAMVAlloc> ptr = myalloc();
+objectvptr cons (objectvptr arg1, objectvptr arg2) {
+  objectvptr ptr = myalloc();
   ptr->ptr.car = arg1;
   ptr->ptr.cdr = arg2;
   return ptr;
 }
 
-VPtr<object, SPIRAMVAlloc> symbol (symbol_t name) {
-  VPtr<object, SPIRAMVAlloc> ptr = myalloc();
+objectvptr symbol (symbol_t name) {
+  objectvptr ptr = myalloc();
   ptr->val.type = SYMBOL;
   ptr->val.name = name;
   return ptr;
 }
 
-VPtr<object, SPIRAMVAlloc> newsymbol (symbol_t name) {
+objectvptr newsymbol (symbol_t name) {
   for (int i=WORKSPACESIZE-1; i>=0; i--) {
-    VPtr<object, SPIRAMVAlloc> obj = Workspace[i];
+    objectvptr obj = Workspace[i];
     if (obj->val.type == SYMBOL && obj->val.name == name) return obj;
   }
   return symbol(name);
 }
 
-VPtr<object, SPIRAMVAlloc> stream (unsigned char streamtype, unsigned char address) {
-  VPtr<object, SPIRAMVAlloc> ptr = myalloc();
+objectvptr stream (unsigned char streamtype, unsigned char address) {
+  objectvptr ptr = myalloc();
   ptr->val.type = STREAM;
   ptr->val.integer = streamtype<<8 | address;
   return ptr;
@@ -308,12 +313,12 @@ VPtr<object, SPIRAMVAlloc> stream (unsigned char streamtype, unsigned char addre
 
 // Garbage collection
 
-void markobject (VPtr<object, SPIRAMVAlloc> obj) {
+void markobject (objectvptr obj) {
   MARK:
   if (obj == nil) return;
   if (marked(obj)) return;
 
-  VPtr<object, SPIRAMVAlloc> arg = car(obj);
+  objectvptr arg = car(obj);
   unsigned int type = obj->val.type;
   mark(obj);
   
@@ -327,7 +332,6 @@ void markobject (VPtr<object, SPIRAMVAlloc> obj) {
     obj = cdr(obj);
     while (obj != nil) {
       arg = car(obj);
-
       mark(obj);
       obj = arg;
     }
@@ -338,12 +342,12 @@ void sweep () {
   Freelist = nil;
   Freespace = 0;
   for (int i=WORKSPACESIZE-1; i>=0; i--) {
-    VPtr<object, SPIRAMVAlloc> obj = Workspace[i];
+    objectvptr obj = Workspace[i];
     if (!marked(obj)) myfree(obj); else unmark(obj);
   }
 }
 
-void gc (VPtr<object, SPIRAMVAlloc> form, VPtr<object, SPIRAMVAlloc> env) {
+void gc (objectvptr form, objectvptr env) {
   #if defined(printgcs)
   int start = Freespace;
   #endif
@@ -360,9 +364,9 @@ void gc (VPtr<object, SPIRAMVAlloc> form, VPtr<object, SPIRAMVAlloc> env) {
 
 // Compact image
 
-void movepointer (VPtr<object, SPIRAMVAlloc> from, VPtr<object, SPIRAMVAlloc> to) {
+void movepointer (objectvptr from, objectvptr to) {
   for (int i=0; i<WORKSPACESIZE; i++) {
-    VPtr<object, SPIRAMVAlloc> obj = Workspace[i];
+    objectvptr obj = Workspace[i];
     unsigned int type = (obj->val.type) & ~MARKBIT;
     if (marked(obj) && (type >= STRING || type==ZERO)) {
       if (car(obj).getRawNum() == (from.getRawNum() | MARKBIT))
@@ -372,7 +376,7 @@ void movepointer (VPtr<object, SPIRAMVAlloc> from, VPtr<object, SPIRAMVAlloc> to
   }
   // Fix strings
   for (int i=0; i<WORKSPACESIZE; i++) {
-    VPtr<object, SPIRAMVAlloc> obj = Workspace[i];
+    objectvptr obj = Workspace[i];
     if (marked(obj) && ((obj->val.type) & ~MARKBIT) == STRING) {
       obj = cdr(obj);
       while (obj != nil) {
@@ -383,13 +387,13 @@ void movepointer (VPtr<object, SPIRAMVAlloc> from, VPtr<object, SPIRAMVAlloc> to
   }
 }
   
-int compactimage (VPtr<object, SPIRAMVAlloc> *arg) {
+int compactimage (objectvptr *arg) {
   markobject(tee);
   markobject(GlobalEnv);
   markobject(GCStack);
-  VPtr<object, SPIRAMVAlloc> firstfree = Workspace[0];
+  objectvptr firstfree = Workspace[0];
   while (marked(firstfree)) firstfree++;
-  VPtr<object, SPIRAMVAlloc> obj = Workspace[WORKSPACESIZE-1];
+  objectvptr obj = Workspace[WORKSPACESIZE-1];
   while (firstfree < obj) {
     if (marked(obj)) {
       car(firstfree) = car(obj);
@@ -409,7 +413,7 @@ int compactimage (VPtr<object, SPIRAMVAlloc> *arg) {
 
 // Make SD card filename
 
-char *MakeFilename (VPtr<object, SPIRAMVAlloc> arg) {
+char *MakeFilename (objectvptr arg) {
   char *buffer = SymbolTop;
   int max = maxbuffer(buffer);
   buffer[0]='/';
@@ -442,7 +446,7 @@ void SpiffsWriteInt (File file, int data) {
   file.write(data>>16 & 0xFF); file.write(data>>24 & 0xFF);
 }
 
-unsigned int saveimage (VPtr<object, SPIRAMVAlloc> arg) {
+unsigned int saveimage (objectvptr arg) {
 #if defined(sdcardsupport)
   unsigned int imagesize = compactimage(&arg);
   SD.begin(SDCARD_SS_PIN);
@@ -462,7 +466,7 @@ unsigned int saveimage (VPtr<object, SPIRAMVAlloc> arg) {
     for (int i=0; i<SYMBOLTABLESIZE; i++) file.write(SymbolTable[i]);
   #endif
   for (unsigned int i=0; i<imagesize; i++) {
-    VPtr<object, SPIRAMVAlloc> obj = &Workspace[i];
+    objectvptr obj = &Workspace[i];
     SDWriteInt(file, (uintptr_t)car(obj));
     SDWriteInt(file, (uintptr_t)cdr(obj));
   }
@@ -487,7 +491,7 @@ unsigned int saveimage (VPtr<object, SPIRAMVAlloc> arg) {
     for (int i=0; i<SYMBOLTABLESIZE; i++) file.write(SymbolTable[i]);
   #endif
   for (unsigned int i=0; i<imagesize; i++) {
-    VPtr<object, SPIRAMVAlloc> obj = Workspace[i];
+    objectvptr obj = Workspace[i];
     SpiffsWriteInt(file, car(obj).getRawNum());
     SpiffsWriteInt(file, cdr(obj).getRawNum());
   }
@@ -516,7 +520,7 @@ int SpiffsReadInt (File file) {
   return b0 | b1<<8 | b2<<16 | b3<<24;
 }
 
-unsigned int loadimage (VPtr<object, SPIRAMVAlloc> arg) {
+unsigned int loadimage (objectvptr arg) {
 #if defined(sdcardsupport)
   SD.begin(SDCARD_SS_PIN);
   File file;
@@ -526,16 +530,16 @@ unsigned int loadimage (VPtr<object, SPIRAMVAlloc> arg) {
   if (!file) error2(LOADIMAGE, PSTR("problem loading from SD card"));
   SDReadInt(file);
   int imagesize = SDReadInt(file);
-  GlobalEnv = (VPtr<object, SPIRAMVAlloc>)SDReadInt(file);
-  GCStack = (VPtr<object, SPIRAMVAlloc>)SDReadInt(file);
+  GlobalEnv = (objectvptr)SDReadInt(file);
+  GCStack = (objectvptr)SDReadInt(file);
   #if SYMBOLTABLESIZE > BUFFERSIZE
   SymbolTop = (char *)SDReadInt(file);
   for (int i=0; i<SYMBOLTABLESIZE; i++) SymbolTable[i] = file.read();
   #endif
   for (int i=0; i<imagesize; i++) {
-    VPtr<object, SPIRAMVAlloc> obj = &Workspace[i];
-    car(obj) = (VPtr<object, SPIRAMVAlloc>)SDReadInt(file);
-    cdr(obj) = (VPtr<object, SPIRAMVAlloc>)SDReadInt(file);
+    objectvptr obj = &Workspace[i];
+    car(obj) = (objectvptr)SDReadInt(file);
+    cdr(obj) = (objectvptr)SDReadInt(file);
   }
   file.close();
   gc(nil, nil);
@@ -556,7 +560,7 @@ unsigned int loadimage (VPtr<object, SPIRAMVAlloc> arg) {
   for (int i=0; i<SYMBOLTABLESIZE; i++) SymbolTable[i] = file.read();
   #endif
   for (int i=0; i<imagesize; i++) {
-    VPtr<object, SPIRAMVAlloc> obj = Workspace[i];
+    objectvptr obj = Workspace[i];
     car(obj).setRawNum(SpiffsReadInt(file));
     cdr(obj).setRawNum(SpiffsReadInt(file));
   }
@@ -571,7 +575,7 @@ void autorunimage () {
   SD.begin(SDCARD_SS_PIN);
   File file = SD.open("/ULISP.IMG");
   if (!file) error2(0, PSTR("problem autorunning from SD card"));
-  VPtr<object, SPIRAMVAlloc> autorun.setRawNum*SDReadInt(file));
+  objectvptr autorun.setRawNum*SDReadInt(file));
   file.close();
   if (autorun != nil) {
     loadimage(nil);
@@ -581,7 +585,7 @@ void autorunimage () {
   SPIFFS.begin();
   File file = SPIFFS.open("/ULISP.IMG", "r");
   if (!file) error2(0, PSTR("problem autorunning from SPIFFS"));
-  VPtr<object, SPIRAMVAlloc> autorun = VPtr<object, SPIRAMVAlloc> { };
+  objectvptr autorun = objectvptr { };
   autorun.setRawNum(SpiffsReadInt(file));
   file.close();
   if (autorun != nil) {
@@ -603,7 +607,7 @@ void errorsub (symbol_t fname, PGM_P string) {
   pfstring(string, pserial);
 }
 
-void error (symbol_t fname, PGM_P string, VPtr<object, SPIRAMVAlloc> symbol) {
+void error (symbol_t fname, PGM_P string, objectvptr symbol) {
   errorsub(fname, string);
   pfstring(PSTR(": "), pserial); printobject(symbol, pserial);
   pln(pserial);
@@ -661,25 +665,25 @@ void untrace (symbol_t name) {
 
 // Helper functions
 
-boolean consp (VPtr<object, SPIRAMVAlloc> x) {
+boolean consp (objectvptr x) {
   if (x == nil) return false;
   unsigned int type = x->val.type;
   return type >= PAIR || type == ZERO;
 }
 
-boolean atom (VPtr<object, SPIRAMVAlloc> x) {
+boolean atom (objectvptr x) {
   if (x == nil) return true;
   unsigned int type = x->val.type;
   return type < PAIR && type != ZERO;
 }
 
-boolean listp (VPtr<object, SPIRAMVAlloc> x) {
+boolean listp (objectvptr x) {
   if (x == nil) return true;
   unsigned int type = x->val.type;
   return type >= PAIR || type == ZERO;
 }
 
-boolean improperp (VPtr<object, SPIRAMVAlloc> x) {
+boolean improperp (objectvptr x) {
   if (x == nil) return false;
   unsigned int type = x->val.type;
   return type < PAIR && type != ZERO;
@@ -726,40 +730,40 @@ char *symbolname (symbol_t x) {
   return buffer;
 }
 
-int checkinteger (symbol_t name, VPtr<object, SPIRAMVAlloc> obj) {
+int checkinteger (symbol_t name, objectvptr obj) {
   if (!integerp(obj)) error(name, PSTR("argument is not an integer"), obj);
   return obj->val.integer;
 }
 
-float checkintfloat (symbol_t name, VPtr<object, SPIRAMVAlloc> obj){
+float checkintfloat (symbol_t name, objectvptr obj){
   if (integerp(obj)) return obj->val.integer;
   if (floatp(obj)) return obj->val.single_float;
   error(name, notanumber, obj);
   return 0;
 }
 
-int checkchar (symbol_t name, VPtr<object, SPIRAMVAlloc> obj) {
+int checkchar (symbol_t name, objectvptr obj) {
   if (!characterp(obj)) error(name, PSTR("argument is not a character"), obj);
   return obj->val.integer;
 }
 
-int isstream (VPtr<object, SPIRAMVAlloc> obj){
+int isstream (objectvptr obj){
   if (!streamp(obj)) error(0, PSTR("not a stream"), obj);
   return obj->val.integer;
 }
 
-int issymbol (VPtr<object, SPIRAMVAlloc> obj, symbol_t n) {
+int issymbol (objectvptr obj, symbol_t n) {
   return symbolp(obj) && obj->val.name == n;
 }
 
-void checkargs (symbol_t name, VPtr<object, SPIRAMVAlloc> args) {
+void checkargs (symbol_t name, objectvptr args) {
   int nargs = listlength(name, args);
   if (name >= ENDFUNCTIONS) error(0, PSTR("not valid here"), symbol(name));
   if (nargs<lookupmin(name)) error2(name, PSTR("has too few arguments"));
   if (nargs>lookupmax(name)) error2(name, PSTR("has too many arguments"));
 }
 
-int eq (VPtr<object, SPIRAMVAlloc> arg1, VPtr<object, SPIRAMVAlloc> arg2) {
+int eq (objectvptr arg1, objectvptr arg2) {
   if (arg1 == arg2) return true;  // Same object
   if ((arg1 == nil) || (arg2 == nil)) return false;  // Not both values
   if (arg1->ptr.cdr != arg2->ptr.cdr) return false;  // Different values
@@ -770,7 +774,7 @@ int eq (VPtr<object, SPIRAMVAlloc> arg1, VPtr<object, SPIRAMVAlloc> arg2) {
   return false;
 }
 
-int listlength (symbol_t name, VPtr<object, SPIRAMVAlloc> list) {
+int listlength (symbol_t name, objectvptr list) {
   int length = 0;
   while (list != nil) {
     if (improperp(list)) error2(name, notproper);
@@ -782,10 +786,10 @@ int listlength (symbol_t name, VPtr<object, SPIRAMVAlloc> list) {
 
 // Association lists
 
-VPtr<object, SPIRAMVAlloc> assoc (VPtr<object, SPIRAMVAlloc> key, VPtr<object, SPIRAMVAlloc> list) {
+objectvptr assoc (objectvptr key, objectvptr list) {
   while (list != nil) {
     if (improperp(list)) error(ASSOC, notproper, list);
-    VPtr<object, SPIRAMVAlloc> pair = first(list);
+    objectvptr pair = first(list);
     if (!listp(pair)) error(ASSOC, PSTR("element is not a list"), pair);
     if (pair != nil && eq(key,car(pair))) return pair;
     list = cdr(list);
@@ -793,11 +797,11 @@ VPtr<object, SPIRAMVAlloc> assoc (VPtr<object, SPIRAMVAlloc> key, VPtr<object, S
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> delassoc (VPtr<object, SPIRAMVAlloc> key, VPtr<object, SPIRAMVAlloc> *alist) {
-  VPtr<object, SPIRAMVAlloc> list = *alist;
-  VPtr<object, SPIRAMVAlloc> prev = nil;
+objectvptr delassoc (objectvptr key, objectvptr *alist) {
+  objectvptr list = *alist;
+  objectvptr prev = nil;
   while (list != nil) {
-    VPtr<object, SPIRAMVAlloc> pair = first(list);
+    objectvptr pair = first(list);
     if (eq(key,car(pair))) {
       if (prev == nil) *alist = cdr(list);
       else cdr(prev) = cdr(list);
@@ -815,13 +819,13 @@ void indent (int spaces, pfun_t pfun) {
   for (int i=0; i<spaces; i++) pfun(' ');
 }
 
-void buildstring (char ch, int *chars, VPtr<object, SPIRAMVAlloc> *head) {
-  static VPtr<object, SPIRAMVAlloc> tail;
+void buildstring (char ch, int *chars, objectvptr *head) {
+  static objectvptr tail;
   static uint8_t shift;
   if (*chars == 0) {
     shift = (sizeof(int)-1)*8;
     *chars = ch<<shift;
-    VPtr<object, SPIRAMVAlloc> cell = myalloc();
+    objectvptr cell = myalloc();
     if (*head == nil) *head = cell; else tail->ptr.car = cell;
     cell->ptr.car = nil;
     cell->val.integer = *chars;
@@ -834,12 +838,12 @@ void buildstring (char ch, int *chars, VPtr<object, SPIRAMVAlloc> *head) {
   }
 }
 
-VPtr<object, SPIRAMVAlloc> readstring (char delim, gfun_t gfun) {
-  VPtr<object, SPIRAMVAlloc> obj = myalloc();
+objectvptr readstring (char delim, gfun_t gfun) {
+  objectvptr obj = myalloc();
   obj->val.type = STRING;
   int ch = gfun();
   if (ch == -1) return nil;
-  VPtr<object, SPIRAMVAlloc> head = nil;
+  objectvptr head = nil;
   int chars = 0;
   while ((ch != delim) && (ch != -1)) {
     if (ch == '\\') ch = gfun();
@@ -850,7 +854,7 @@ VPtr<object, SPIRAMVAlloc> readstring (char delim, gfun_t gfun) {
   return obj;
 }
 
-int stringlength (VPtr<object, SPIRAMVAlloc> form) {
+int stringlength (objectvptr form) {
   int length = 0;
   form = cdr(form);
   while (form != nil) {
@@ -863,8 +867,8 @@ int stringlength (VPtr<object, SPIRAMVAlloc> form) {
   return length;
 }
 
-char nthchar (VPtr<object, SPIRAMVAlloc> string, int n) {
-  VPtr<object, SPIRAMVAlloc> arg = cdr(string);
+char nthchar (objectvptr string, int n) {
+  objectvptr arg = cdr(string);
   int top;
   if (sizeof(int) == 4) { top = n>>2; n = 3 - (n&3); }
   else { top = n>>1; n = 1 - (n&1); }
@@ -876,12 +880,12 @@ char nthchar (VPtr<object, SPIRAMVAlloc> string, int n) {
   return (arg->val.integer)>>(n*8) & 0xFF;
 }
 
-char *cstringbuf (VPtr<object, SPIRAMVAlloc> arg) {
+char *cstringbuf (objectvptr arg) {
   cstring(arg, SymbolTop, SYMBOLTABLESIZE-(SymbolTop-SymbolTable));
   return SymbolTop;
 }
 
-char *cstring (VPtr<object, SPIRAMVAlloc> form, char *buffer, int buflen) {
+char *cstring (objectvptr form, char *buffer, int buflen) {
   int index = 0;
   form = cdr(form);
   while (form != nil) {
@@ -899,11 +903,11 @@ char *cstring (VPtr<object, SPIRAMVAlloc> form, char *buffer, int buflen) {
   return buffer;
 }
 
-VPtr<object, SPIRAMVAlloc> lispstring (char *s) {
-  VPtr<object, SPIRAMVAlloc> obj = myalloc();
+objectvptr lispstring (char *s) {
+  objectvptr obj = myalloc();
   obj->val.type = STRING;
   char ch = *s++;
-  VPtr<object, SPIRAMVAlloc> head = nil;
+  objectvptr head = nil;
   int chars = 0;
   while (ch) {
     if (ch == '\\') ch = *s++;
@@ -916,18 +920,18 @@ VPtr<object, SPIRAMVAlloc> lispstring (char *s) {
 
 // Lookup variable in environment
 
-VPtr<object, SPIRAMVAlloc> value (symbol_t n, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr value (symbol_t n, objectvptr env) {
   while (env != nil) {
-    VPtr<object, SPIRAMVAlloc> pair = car(env);
+    objectvptr pair = car(env);
     if (pair != nil && car(pair)->val.name == n) return pair;
     env = cdr(env);
   }
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> findvalue (VPtr<object, SPIRAMVAlloc> var, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr findvalue (objectvptr var, objectvptr env) {
   symbol_t varname = var->val.name;
-  VPtr<object, SPIRAMVAlloc> pair = value(varname, env);
+  objectvptr pair = value(varname, env);
   if (pair == nil) pair = value(varname, GlobalEnv);
   if (pair == nil) error(0, PSTR("unknown variable"), var);
   return pair;
@@ -935,7 +939,7 @@ VPtr<object, SPIRAMVAlloc> findvalue (VPtr<object, SPIRAMVAlloc> var, VPtr<objec
 
 // Handling closures
   
-VPtr<object, SPIRAMVAlloc> closure (int tc, symbol_t name, VPtr<object, SPIRAMVAlloc> state, VPtr<object, SPIRAMVAlloc> function, VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> *env) {
+objectvptr closure (int tc, symbol_t name, objectvptr state, objectvptr function, objectvptr args, objectvptr *env) {
   int trace = 0;
   if (name) trace = tracing(name);
   if (trace) {
@@ -943,7 +947,7 @@ VPtr<object, SPIRAMVAlloc> closure (int tc, symbol_t name, VPtr<object, SPIRAMVA
     pint(TraceDepth[trace-1]++, pserial);
     pserial(':'); pserial(' '); pserial('('); pstring(symbolname(name), pserial);
   }
-  VPtr<object, SPIRAMVAlloc> params = first(function);
+  objectvptr params = first(function);
   function = cdr(function);
   // Dropframe
   if (tc) {
@@ -954,15 +958,15 @@ VPtr<object, SPIRAMVAlloc> closure (int tc, symbol_t name, VPtr<object, SPIRAMVA
   }
   // Push state
   while (state != nil) {
-    VPtr<object, SPIRAMVAlloc> pair = first(state);
+    objectvptr pair = first(state);
     push(pair, *env);
     state = cdr(state);
   }
   // Add arguments to environment
   boolean optional = false;
   while (params != nil) {
-    VPtr<object, SPIRAMVAlloc> value;
-    VPtr<object, SPIRAMVAlloc> var = first(params);
+    objectvptr value;
+    objectvptr var = first(params);
     if (symbolp(var) && var->val.name == OPTIONAL) optional = true;  
     else {
       if (consp(var)) {
@@ -1002,7 +1006,7 @@ VPtr<object, SPIRAMVAlloc> closure (int tc, symbol_t name, VPtr<object, SPIRAMVA
   return tf_progn(function, *env);
 }
 
-VPtr<object, SPIRAMVAlloc> apply (symbol_t name, VPtr<object, SPIRAMVAlloc> function, VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr apply (symbol_t name, objectvptr function, objectvptr args, objectvptr env) {
   if (symbolp(function)) {
     symbol_t fname = function->val.name;
     checkargs(fname, args);
@@ -1010,12 +1014,12 @@ VPtr<object, SPIRAMVAlloc> apply (symbol_t name, VPtr<object, SPIRAMVAlloc> func
   }
   if (consp(function) && issymbol(car(function), LAMBDA)) {
     function = cdr(function);
-    VPtr<object, SPIRAMVAlloc> result = closure(0, 0, nil, function, args, &env);
+    objectvptr result = closure(0, 0, nil, function, args, &env);
     return eval(result, env);
   }
   if (consp(function) && issymbol(car(function), CLOSURE)) {
     function = cdr(function);
-    VPtr<object, SPIRAMVAlloc> result = closure(0, 0, car(function), cdr(function), args, &env);
+    objectvptr result = closure(0, 0, car(function), cdr(function), args, &env);
     return eval(result, env);
   }
   error(name, PSTR("illegal function"), function);
@@ -1024,22 +1028,22 @@ VPtr<object, SPIRAMVAlloc> apply (symbol_t name, VPtr<object, SPIRAMVAlloc> func
 
 // In-place operations
 
-VPtr<object, SPIRAMVAlloc> *place (symbol_t name, VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr *place (symbol_t name, objectvptr args, objectvptr env) {
   if (atom(args)) return &cdr(findvalue(args, env));
-  VPtr<object, SPIRAMVAlloc> function = first(args);
+  objectvptr function = first(args);
   if (issymbol(function, CAR) || issymbol(function, FIRST)) {
-    VPtr<object, SPIRAMVAlloc> value = eval(second(args), env);
+    objectvptr value = eval(second(args), env);
     if (!listp(value)) error(name, PSTR("can't take car"), value);
     return &car(value);
   }
   if (issymbol(function, CDR) || issymbol(function, REST)) {
-    VPtr<object, SPIRAMVAlloc> value = eval(second(args), env);
+    objectvptr value = eval(second(args), env);
     if (!listp(value)) error(name, PSTR("can't take cdr"), value);
     return &cdr(value);
   }
   if (issymbol(function, NTH)) {
     int index = checkinteger(NTH, eval(second(args), env));
-    VPtr<object, SPIRAMVAlloc> list = eval(third(args), env);
+    objectvptr list = eval(third(args), env);
     if (atom(list)) error(name, PSTR("second argument to nth is not a list"), list);
     while (index > 0) {
       list = cdr(list);
@@ -1054,13 +1058,13 @@ VPtr<object, SPIRAMVAlloc> *place (symbol_t name, VPtr<object, SPIRAMVAlloc> arg
 
 // Checked car and cdr
 
-inline VPtr<object, SPIRAMVAlloc> carx (VPtr<object, SPIRAMVAlloc> arg) {
+inline objectvptr carx (objectvptr arg) {
   if (!listp(arg)) error(0, PSTR("Can't take car"), arg);
   if (arg == nil) return nil;
   return car(arg);
 }
 
-inline VPtr<object, SPIRAMVAlloc> cdrx (VPtr<object, SPIRAMVAlloc> arg) {
+inline objectvptr cdrx (objectvptr arg) {
   if (!listp(arg)) error(0, PSTR("Can't take cdr"), arg);
   if (arg == nil) return nil;
   return cdr(arg);
@@ -1150,7 +1154,7 @@ void serialend (int address) {
   if (address == 1) {Serial1.flush(); Serial1.end(); }
 }
 
-gfun_t gstreamfun (VPtr<object, SPIRAMVAlloc> args) {
+gfun_t gstreamfun (objectvptr args) {
   int streamtype = SERIALSTREAM;
   int address = 0;
   gfun_t gfun = gserial;
@@ -1181,7 +1185,7 @@ inline void SDwrite (char c) { SDpfile.write(c); }
 #endif
 inline void SPIFFSwrite (char c) { SPIFFSpfile.write(c); }
 
-pfun_t pstreamfun (VPtr<object, SPIRAMVAlloc> args) {
+pfun_t pstreamfun (objectvptr args) {
   int streamtype = SERIALSTREAM;
   int address = 0;
   pfun_t pfun = pserial;
@@ -1255,41 +1259,41 @@ void sleep (int secs) {
 
 // Special forms
 
-VPtr<object, SPIRAMVAlloc> sp_quote (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_quote (objectvptr args, objectvptr env) {
   (void) env;
   checkargs(QUOTE, args); 
   return first(args);
 }
 
-VPtr<object, SPIRAMVAlloc> sp_defun (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_defun (objectvptr args, objectvptr env) {
   (void) env;
   checkargs(DEFUN, args);
-  VPtr<object, SPIRAMVAlloc> var = first(args);
+  objectvptr var = first(args);
   if (var->val.type != SYMBOL) error(DEFUN, PSTR("not a symbol"), var);
-  VPtr<object, SPIRAMVAlloc> val = cons(symbol(LAMBDA), cdr(args));
-  VPtr<object, SPIRAMVAlloc> pair = value(var->val.name,GlobalEnv);
+  objectvptr val = cons(symbol(LAMBDA), cdr(args));
+  objectvptr pair = value(var->val.name,GlobalEnv);
   if (pair != nil) { cdr(pair) = val; return var; }
   push(cons(var, val), GlobalEnv);
   return var;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_defvar (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_defvar (objectvptr args, objectvptr env) {
   checkargs(DEFVAR, args);
-  VPtr<object, SPIRAMVAlloc> var = first(args);
+  objectvptr var = first(args);
   if (var->val.type != SYMBOL) error(DEFVAR, PSTR("not a symbol"), var);
-  VPtr<object, SPIRAMVAlloc> val = nil;
+  objectvptr val = nil;
   val = eval(second(args), env);
-  VPtr<object, SPIRAMVAlloc> pair = value(var->val.name, GlobalEnv);
+  objectvptr pair = value(var->val.name, GlobalEnv);
   if (pair != nil) { cdr(pair) = val; return var; }
   push(cons(var, val), GlobalEnv);
   return var;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_setq (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> arg = nil;
+objectvptr sp_setq (objectvptr args, objectvptr env) {
+  objectvptr arg = nil;
   while (args != nil) {
     if (cdr(args) == nil) error2(SETQ, PSTR("odd number of parameters"));
-    VPtr<object, SPIRAMVAlloc> pair = findvalue(first(args), env);
+    objectvptr pair = findvalue(first(args), env);
     arg = eval(second(args), env);
     cdr(pair) = arg;
     args = cddr(args);
@@ -1297,13 +1301,13 @@ VPtr<object, SPIRAMVAlloc> sp_setq (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   return arg;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_loop (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> start = args;
+objectvptr sp_loop (objectvptr args, objectvptr env) {
+  objectvptr start = args;
   for (;;) {
     yield();
     args = start;
     while (args != nil) {
-      VPtr<object, SPIRAMVAlloc> result = eval(car(args),env);
+      objectvptr result = eval(car(args),env);
       if (tstflag(RETURNFLAG)) {
         clrflag(RETURNFLAG);
         return result;
@@ -1313,37 +1317,37 @@ VPtr<object, SPIRAMVAlloc> sp_loop (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   }
 }
 
-VPtr<object, SPIRAMVAlloc> sp_return (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> result = eval(tf_progn(args,env), env);
+objectvptr sp_return (objectvptr args, objectvptr env) {
+  objectvptr result = eval(tf_progn(args,env), env);
   setflag(RETURNFLAG);
   return result;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_push (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_push (objectvptr args, objectvptr env) {
   checkargs(PUSH, args); 
-  VPtr<object, SPIRAMVAlloc> item = eval(first(args), env);
-  VPtr<object, SPIRAMVAlloc> *loc = place(PUSH, second(args), env);
+  objectvptr item = eval(first(args), env);
+  objectvptr *loc = place(PUSH, second(args), env);
   push(item, *loc);
   return *loc;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_pop (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_pop (objectvptr args, objectvptr env) {
   checkargs(POP, args); 
-  VPtr<object, SPIRAMVAlloc> *loc = place(POP, first(args), env);
-  VPtr<object, SPIRAMVAlloc> result = car(*loc);
+  objectvptr *loc = place(POP, first(args), env);
+  objectvptr result = car(*loc);
   pop(*loc);
   return result;
 }
 
 // Special forms incf/decf
 
-VPtr<object, SPIRAMVAlloc> sp_incf (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_incf (objectvptr args, objectvptr env) {
   checkargs(INCF, args); 
-  VPtr<object, SPIRAMVAlloc> *loc = place(INCF, first(args), env);
+  objectvptr *loc = place(INCF, first(args), env);
   args = cdr(args);
   
-  VPtr<object, SPIRAMVAlloc> x = *loc;
-  VPtr<object, SPIRAMVAlloc> inc = (args != nil) ? eval(first(args), env) : nil;
+  objectvptr x = *loc;
+  objectvptr inc = (args != nil) ? eval(first(args), env) : nil;
 
   if (floatp(x) || floatp(inc)) {
     float increment;
@@ -1371,13 +1375,13 @@ VPtr<object, SPIRAMVAlloc> sp_incf (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   return *loc;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_decf (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_decf (objectvptr args, objectvptr env) {
   checkargs(DECF, args); 
-  VPtr<object, SPIRAMVAlloc> *loc = place(DECF, first(args), env);
+  objectvptr *loc = place(DECF, first(args), env);
   args = cdr(args);
   
-  VPtr<object, SPIRAMVAlloc> x = *loc;
-  VPtr<object, SPIRAMVAlloc> dec = (args != nil) ? eval(first(args), env) : nil;
+  objectvptr x = *loc;
+  objectvptr dec = (args != nil) ? eval(first(args), env) : nil;
 
   if (floatp(x) || floatp(dec)) {
     float decrement;
@@ -1405,11 +1409,11 @@ VPtr<object, SPIRAMVAlloc> sp_decf (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   return *loc;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_setf (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> arg = nil;
+objectvptr sp_setf (objectvptr args, objectvptr env) {
+  objectvptr arg = nil;
   while (args != nil) {
     if (cdr(args) == nil) error2(SETF, PSTR("odd number of parameters"));
-    VPtr<object, SPIRAMVAlloc> *loc = place(SETF, first(args), env);
+    objectvptr *loc = place(SETF, first(args), env);
     arg = eval(second(args), env);
     *loc = arg;
     args = cddr(args);
@@ -1417,22 +1421,22 @@ VPtr<object, SPIRAMVAlloc> sp_setf (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   return arg;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_dolist (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_dolist (objectvptr args, objectvptr env) {
   if (args == nil) error2(DOLIST, noargument);
-  VPtr<object, SPIRAMVAlloc> params = first(args);
-  VPtr<object, SPIRAMVAlloc> var = first(params);
-  VPtr<object, SPIRAMVAlloc> list = eval(second(params), env);
+  objectvptr params = first(args);
+  objectvptr var = first(params);
+  objectvptr list = eval(second(params), env);
   push(list, GCStack); // Don't GC the list
-  VPtr<object, SPIRAMVAlloc> pair = cons(var,nil);
+  objectvptr pair = cons(var,nil);
   push(pair,env);
   params = cdr(cdr(params));
   args = cdr(args);
   while (list != nil) {
     if (improperp(list)) error(DOLIST, notproper, list);
     cdr(pair) = first(list);
-    VPtr<object, SPIRAMVAlloc> forms = args;
+    objectvptr forms = args;
     while (forms != nil) {
-      VPtr<object, SPIRAMVAlloc> result = eval(car(forms), env);
+      objectvptr result = eval(car(forms), env);
       if (tstflag(RETURNFLAG)) {
         clrflag(RETURNFLAG);
         pop(GCStack);
@@ -1448,21 +1452,21 @@ VPtr<object, SPIRAMVAlloc> sp_dolist (VPtr<object, SPIRAMVAlloc> args, VPtr<obje
   return eval(car(params), env);
 }
 
-VPtr<object, SPIRAMVAlloc> sp_dotimes (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_dotimes (objectvptr args, objectvptr env) {
   if (args == nil) error2(DOTIMES, noargument);
-  VPtr<object, SPIRAMVAlloc> params = first(args);
-  VPtr<object, SPIRAMVAlloc> var = first(params);
+  objectvptr params = first(args);
+  objectvptr var = first(params);
   int count = checkinteger(DOTIMES, eval(second(params), env));
   int index = 0;
   params = cdr(cdr(params));
-  VPtr<object, SPIRAMVAlloc> pair = cons(var,number(0));
+  objectvptr pair = cons(var,number(0));
   push(pair,env);
   args = cdr(args);
   while (index < count) {
     cdr(pair) = number(index);
-    VPtr<object, SPIRAMVAlloc> forms = args;
+    objectvptr forms = args;
     while (forms != nil) {
-      VPtr<object, SPIRAMVAlloc> result = eval(car(forms), env);
+      objectvptr result = eval(car(forms), env);
       if (tstflag(RETURNFLAG)) {
         clrflag(RETURNFLAG);
         return result;
@@ -1476,7 +1480,7 @@ VPtr<object, SPIRAMVAlloc> sp_dotimes (VPtr<object, SPIRAMVAlloc> args, VPtr<obj
   return eval(car(params), env);
 }
 
-VPtr<object, SPIRAMVAlloc> sp_trace (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_trace (objectvptr args, objectvptr env) {
   (void) env;
   while (args != nil) {
       trace(first(args)->val.name);
@@ -1490,7 +1494,7 @@ VPtr<object, SPIRAMVAlloc> sp_trace (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
   return args;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_untrace (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_untrace (objectvptr args, objectvptr env) {
   (void) env;
   if (args == nil) {
     int i = 0;
@@ -1508,8 +1512,8 @@ VPtr<object, SPIRAMVAlloc> sp_untrace (VPtr<object, SPIRAMVAlloc> args, VPtr<obj
   return args;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_formillis (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> param = first(args);
+objectvptr sp_formillis (objectvptr args, objectvptr env) {
+  objectvptr param = first(args);
   unsigned long start = millis();
   unsigned long now, total = 0;
   if (param != nil) total = checkinteger(FORMILLIS, eval(first(param), env));
@@ -1522,49 +1526,49 @@ VPtr<object, SPIRAMVAlloc> sp_formillis (VPtr<object, SPIRAMVAlloc> args, VPtr<o
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_withserial (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> params = first(args);
+objectvptr sp_withserial (objectvptr args, objectvptr env) {
+  objectvptr params = first(args);
   if (params == nil) error2(WITHSERIAL, nostream);
-  VPtr<object, SPIRAMVAlloc> var = first(params);
+  objectvptr var = first(params);
   int address = checkinteger(WITHSERIAL, eval(second(params), env));
   params = cddr(params);
   int baud = 96;
   if (params != nil) baud = checkinteger(WITHSERIAL, eval(first(params), env));
-  VPtr<object, SPIRAMVAlloc> pair = cons(var, stream(SERIALSTREAM, address));
+  objectvptr pair = cons(var, stream(SERIALSTREAM, address));
   push(pair,env);
   serialbegin(address, baud);
-  VPtr<object, SPIRAMVAlloc> forms = cdr(args);
-  VPtr<object, SPIRAMVAlloc> result = eval(tf_progn(forms,env), env);
+  objectvptr forms = cdr(args);
+  objectvptr result = eval(tf_progn(forms,env), env);
   serialend(address);
   return result;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_withi2c (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> params = first(args);
+objectvptr sp_withi2c (objectvptr args, objectvptr env) {
+  objectvptr params = first(args);
   if (params == nil) error2(WITHI2C, nostream);
-  VPtr<object, SPIRAMVAlloc> var = first(params);
+  objectvptr var = first(params);
   int address = checkinteger(WITHI2C, eval(second(params), env));
   params = cddr(params);
   int read = 0; // Write
   I2CCount = 0;
   if (params != nil) {
-    VPtr<object, SPIRAMVAlloc> rw = eval(first(params), env);
+    objectvptr rw = eval(first(params), env);
     if (integerp(rw)) I2CCount = rw->val.integer;
     read = (rw != nil);
   }
   I2Cinit(1); // Pullups
-  VPtr<object, SPIRAMVAlloc> pair = cons(var, (I2Cstart(address, read)) ? stream(I2CSTREAM, address) : nil);
+  objectvptr pair = cons(var, (I2Cstart(address, read)) ? stream(I2CSTREAM, address) : nil);
   push(pair,env);
-  VPtr<object, SPIRAMVAlloc> forms = cdr(args);
-  VPtr<object, SPIRAMVAlloc> result = eval(tf_progn(forms,env), env);
+  objectvptr forms = cdr(args);
+  objectvptr result = eval(tf_progn(forms,env), env);
   I2Cstop(read);
   return result;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_withspi (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> params = first(args);
+objectvptr sp_withspi (objectvptr args, objectvptr env) {
+  objectvptr params = first(args);
   if (params == nil) error2(WITHSPI, nostream);
-  VPtr<object, SPIRAMVAlloc> var = first(params);
+  objectvptr var = first(params);
   params = cdr(params);
   if (params == nil) error2(WITHSPI, nostream);
   int pin = checkinteger(WITHSPI, eval(car(params), env));
@@ -1585,23 +1589,23 @@ VPtr<object, SPIRAMVAlloc> sp_withspi (VPtr<object, SPIRAMVAlloc> args, VPtr<obj
       }
     }
   }
-  VPtr<object, SPIRAMVAlloc> pair = cons(var, stream(SPISTREAM, pin));
+  objectvptr pair = cons(var, stream(SPISTREAM, pin));
   push(pair,env);
   SPI.begin();
   SPI.beginTransaction(SPISettings(((unsigned long)clock * 1000), bitorder, mode));
   digitalWrite(pin, LOW);
-  VPtr<object, SPIRAMVAlloc> forms = cdr(args);
-  VPtr<object, SPIRAMVAlloc> result = eval(tf_progn(forms,env), env);
+  objectvptr forms = cdr(args);
+  objectvptr result = eval(tf_progn(forms,env), env);
   digitalWrite(pin, HIGH);
   SPI.endTransaction();
   return result;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_withsdcard (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr sp_withsdcard (objectvptr args, objectvptr env) {
 #if defined(sdcardsupport)
-  VPtr<object, SPIRAMVAlloc> params = first(args);
-  VPtr<object, SPIRAMVAlloc> var = first(params);
-  VPtr<object, SPIRAMVAlloc> filename = eval(second(params), env);
+  objectvptr params = first(args);
+  objectvptr var = first(params);
+  objectvptr filename = eval(second(params), env);
   params = cddr(params);
   SD.begin();
   int mode = 0;
@@ -1615,10 +1619,10 @@ VPtr<object, SPIRAMVAlloc> sp_withsdcard (VPtr<object, SPIRAMVAlloc> args, VPtr<
     SDgfile = SD.open(MakeFilename(filename), oflag);
     if (!SDgfile) error2(WITHSDCARD, PSTR("problem reading from SD card"));
   }
-  VPtr<object, SPIRAMVAlloc> pair = cons(var, stream(SDSTREAM, 1));
+  objectvptr pair = cons(var, stream(SDSTREAM, 1));
   push(pair,env);
-  VPtr<object, SPIRAMVAlloc> forms = cdr(args);
-  VPtr<object, SPIRAMVAlloc> result = eval(tf_progn(forms,env), env);
+  objectvptr forms = cdr(args);
+  objectvptr result = eval(tf_progn(forms,env), env);
   if (mode >= 1) SDpfile.close(); else SDgfile.close();
   return result;
 #else
@@ -1628,10 +1632,10 @@ VPtr<object, SPIRAMVAlloc> sp_withsdcard (VPtr<object, SPIRAMVAlloc> args, VPtr<
 #endif
 }
 
-VPtr<object, SPIRAMVAlloc> sp_withspiffs (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> params = first(args);
-  VPtr<object, SPIRAMVAlloc> var = first(params);
-  VPtr<object, SPIRAMVAlloc> filename = eval(second(params), env);
+objectvptr sp_withspiffs (objectvptr args, objectvptr env) {
+  objectvptr params = first(args);
+  objectvptr var = first(params);
+  objectvptr filename = eval(second(params), env);
   params = cddr(params);
   SPIFFS.begin();
   int mode = 0;
@@ -1645,17 +1649,17 @@ VPtr<object, SPIRAMVAlloc> sp_withspiffs (VPtr<object, SPIRAMVAlloc> args, VPtr<
     SPIFFSgfile = SPIFFS.open(MakeFilename(filename), oflag);
     if (!SPIFFSgfile) error2(WITHSPIFFS, PSTR("problem reading from SPIFFS"));
   }
-  VPtr<object, SPIRAMVAlloc> pair = cons(var, stream(SPIFFSSTREAM, 1));
+  objectvptr pair = cons(var, stream(SPIFFSSTREAM, 1));
   push(pair,env);
-  VPtr<object, SPIRAMVAlloc> forms = cdr(args);
-  VPtr<object, SPIRAMVAlloc> result = eval(tf_progn(forms,env), env);
+  objectvptr forms = cdr(args);
+  objectvptr result = eval(tf_progn(forms,env), env);
   if (mode >= 1) SPIFFSpfile.close(); else SPIFFSgfile.close();
   return result;
 }
 
-VPtr<object, SPIRAMVAlloc> sp_withclient (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> params = first(args);
-  VPtr<object, SPIRAMVAlloc> var = first(params);
+objectvptr sp_withclient (objectvptr args, objectvptr env) {
+  objectvptr params = first(args);
+  objectvptr var = first(params);
   params = cdr(params);
   int n;
   if (params == nil) {
@@ -1663,8 +1667,8 @@ VPtr<object, SPIRAMVAlloc> sp_withclient (VPtr<object, SPIRAMVAlloc> args, VPtr<
     if (!client) return nil;
     n = 2;
   } else {
-    VPtr<object, SPIRAMVAlloc> address = eval(first(params), env);
-    VPtr<object, SPIRAMVAlloc> port = eval(second(params), env);
+    objectvptr address = eval(first(params), env);
+    objectvptr port = eval(second(params), env);
     int success;
     if (stringp(address)) success = client.connect(cstringbuf(address), checkinteger(WITHCLIENT, port));
     else if (integerp(address)) success = client.connect(address->val.integer, checkinteger(WITHCLIENT, port));
@@ -1672,21 +1676,21 @@ VPtr<object, SPIRAMVAlloc> sp_withclient (VPtr<object, SPIRAMVAlloc> args, VPtr<
     if (!success) return nil;
     n = 1;
   }
-  VPtr<object, SPIRAMVAlloc> pair = cons(var, stream(WIFISTREAM, n));
+  objectvptr pair = cons(var, stream(WIFISTREAM, n));
   push(pair,env);
-  VPtr<object, SPIRAMVAlloc> forms = cdr(args);
-  VPtr<object, SPIRAMVAlloc> result = eval(tf_progn(forms,env), env);
+  objectvptr forms = cdr(args);
+  objectvptr result = eval(tf_progn(forms,env), env);
   client.stop();
   return result;
 }
 
 // Tail-recursive forms
 
-VPtr<object, SPIRAMVAlloc> tf_progn (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr tf_progn (objectvptr args, objectvptr env) {
   if (args == nil) return nil;
-  VPtr<object, SPIRAMVAlloc> more = cdr(args);
+  objectvptr more = cdr(args);
   while (more != nil) {
-    VPtr<object, SPIRAMVAlloc> result = eval(car(args),env);
+    objectvptr result = eval(car(args),env);
     if (tstflag(RETURNFLAG)) return result;
     args = more;
     more = cdr(args);
@@ -1694,19 +1698,19 @@ VPtr<object, SPIRAMVAlloc> tf_progn (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
   return car(args);
 }
 
-VPtr<object, SPIRAMVAlloc> tf_if (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr tf_if (objectvptr args, objectvptr env) {
   if (args == nil || cdr(args) == nil) error2(IF, PSTR("missing argument(s)"));
   if (eval(first(args), env) != nil) return second(args);
   args = cddr(args);
   return (args != nil) ? first(args) : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> tf_cond (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr tf_cond (objectvptr args, objectvptr env) {
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> clause = first(args);
+    objectvptr clause = first(args);
     if (!consp(clause)) error(COND, PSTR("illegal clause"), clause);
-    VPtr<object, SPIRAMVAlloc> test = eval(first(clause), env);
-    VPtr<object, SPIRAMVAlloc> forms = cdr(clause);
+    objectvptr test = eval(first(clause), env);
+    objectvptr forms = cdr(clause);
     if (test != nil) {
       if (forms == nil) return test; else return tf_progn(forms, env);
     }
@@ -1715,26 +1719,26 @@ VPtr<object, SPIRAMVAlloc> tf_cond (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> tf_when (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr tf_when (objectvptr args, objectvptr env) {
   if (args == nil) error2(WHEN, noargument);
   if (eval(first(args), env) != nil) return tf_progn(cdr(args),env);
   else return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> tf_unless (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr tf_unless (objectvptr args, objectvptr env) {
   if (args == nil) error2(UNLESS, noargument);
   if (eval(first(args), env) != nil) return nil;
   else return tf_progn(cdr(args),env);
 }
 
-VPtr<object, SPIRAMVAlloc> tf_case (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> test = eval(first(args), env);
+objectvptr tf_case (objectvptr args, objectvptr env) {
+  objectvptr test = eval(first(args), env);
   args = cdr(args);
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> clause = first(args);
+    objectvptr clause = first(args);
     if (!consp(clause)) error(CASE, PSTR("illegal clause"), clause);
-    VPtr<object, SPIRAMVAlloc> key = car(clause);
-    VPtr<object, SPIRAMVAlloc> forms = cdr(clause);
+    objectvptr key = car(clause);
+    objectvptr forms = cdr(clause);
     if (consp(key)) {
       while (key != nil) {
         if (eq(test,car(key))) return tf_progn(forms, env);
@@ -1746,9 +1750,9 @@ VPtr<object, SPIRAMVAlloc> tf_case (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> tf_and (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr tf_and (objectvptr args, objectvptr env) {
   if (args == nil) return tee;
-  VPtr<object, SPIRAMVAlloc> more = cdr(args);
+  objectvptr more = cdr(args);
   while (more != nil) {
     if (eval(car(args), env) == nil) return nil;
     args = more;
@@ -1757,7 +1761,7 @@ VPtr<object, SPIRAMVAlloc> tf_and (VPtr<object, SPIRAMVAlloc> args, VPtr<object,
   return car(args);
 }
 
-VPtr<object, SPIRAMVAlloc> tf_or (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr tf_or (objectvptr args, objectvptr env) {
   while (args != nil) {
     if (eval(car(args), env) != nil) return car(args);
     args = cdr(args);
@@ -1767,137 +1771,137 @@ VPtr<object, SPIRAMVAlloc> tf_or (VPtr<object, SPIRAMVAlloc> args, VPtr<object, 
 
 // Core functions
 
-VPtr<object, SPIRAMVAlloc> fn_not (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_not (objectvptr args, objectvptr env) {
   (void) env;
   return (first(args) == nil) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cons (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cons (objectvptr args, objectvptr env) {
   (void) env;
   return cons(first(args), second(args));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_atom (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_atom (objectvptr args, objectvptr env) {
   (void) env;
   return atom(first(args)) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_listp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_listp (objectvptr args, objectvptr env) {
   (void) env;
   return listp(first(args)) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_consp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_consp (objectvptr args, objectvptr env) {
   (void) env;
   return consp(first(args)) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_symbolp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_symbolp (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   return symbolp(arg) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_streamp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_streamp (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   return streamp(arg) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_eq (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_eq (objectvptr args, objectvptr env) {
   (void) env;
   return eq(first(args), second(args)) ? tee : nil;
 }
 
 // List functions
 
-VPtr<object, SPIRAMVAlloc> fn_car (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_car (objectvptr args, objectvptr env) {
   (void) env;
   return carx(first(args));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cdr (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cdr (objectvptr args, objectvptr env) {
   (void) env;
   return cdrx(first(args));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_caar (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_caar (objectvptr args, objectvptr env) {
   (void) env;
   return carx(carx(first(args)));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cadr (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cadr (objectvptr args, objectvptr env) {
   (void) env;
   return carx(cdrx(first(args)));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cdar (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cdar (objectvptr args, objectvptr env) {
   (void) env;
   return cdrx(carx(first(args)));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cddr (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cddr (objectvptr args, objectvptr env) {
   (void) env;
   return cdrx(cdrx(first(args)));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_caaar (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_caaar (objectvptr args, objectvptr env) {
   (void) env;
   return carx(carx(carx(first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_caadr (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_caadr (objectvptr args, objectvptr env) {
   (void) env;
   return carx(carx(cdrx(first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cadar (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cadar (objectvptr args, objectvptr env) {
   (void) env;
   return carx(cdrx(carx(first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_caddr (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_caddr (objectvptr args, objectvptr env) {
   (void) env;
   return carx(cdrx(cdrx(first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cdaar (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cdaar (objectvptr args, objectvptr env) {
   (void) env;
   return cdrx(carx(carx(first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cdadr (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cdadr (objectvptr args, objectvptr env) {
   (void) env;
   return cdrx(carx(cdrx(first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cddar (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cddar (objectvptr args, objectvptr env) {
   (void) env;
   return cdrx(cdrx(carx(first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cdddr (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cdddr (objectvptr args, objectvptr env) {
   (void) env;
   return cdrx(cdrx(cdrx(first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_length (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_length (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (listp(arg)) return number(listlength(LENGTH, arg));
   if (!stringp(arg)) error(LENGTH, PSTR("argument is not a list or string"), arg);
   return number(stringlength(arg));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_list (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_list (objectvptr args, objectvptr env) {
   (void) env;
   return args;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_reverse (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_reverse (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> list = first(args);
-  VPtr<object, SPIRAMVAlloc> result = nil;
+  objectvptr list = first(args);
+  objectvptr result = nil;
   while (list != nil) {
     if (improperp(list)) error(REVERSE, notproper, list);
     push(first(list),result);
@@ -1906,10 +1910,10 @@ VPtr<object, SPIRAMVAlloc> fn_reverse (VPtr<object, SPIRAMVAlloc> args, VPtr<obj
   return result;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_nth (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_nth (objectvptr args, objectvptr env) {
   (void) env;
   int n = checkinteger(NTH, first(args));
-  VPtr<object, SPIRAMVAlloc> list = second(args);
+  objectvptr list = second(args);
   while (list != nil) {
     if (improperp(list)) error(NTH, notproper, list);
     if (n == 0) return car(list);
@@ -1919,17 +1923,17 @@ VPtr<object, SPIRAMVAlloc> fn_nth (VPtr<object, SPIRAMVAlloc> args, VPtr<object,
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_assoc (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_assoc (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> key = first(args);
-  VPtr<object, SPIRAMVAlloc> list = second(args);
+  objectvptr key = first(args);
+  objectvptr list = second(args);
   return assoc(key,list);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_member (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_member (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> item = first(args);
-  VPtr<object, SPIRAMVAlloc> list = second(args);
+  objectvptr item = first(args);
+  objectvptr list = second(args);
   while (list != nil) {
     if (improperp(list)) error(MEMBER, notproper, list);
     if (eq(item,car(list))) return list;
@@ -1938,32 +1942,32 @@ VPtr<object, SPIRAMVAlloc> fn_member (VPtr<object, SPIRAMVAlloc> args, VPtr<obje
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_apply (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> previous = nil;
-  VPtr<object, SPIRAMVAlloc> last = args;
+objectvptr fn_apply (objectvptr args, objectvptr env) {
+  objectvptr previous = nil;
+  objectvptr last = args;
   while (cdr(last) != nil) {
     previous = last;
     last = cdr(last);
   }
-  VPtr<object, SPIRAMVAlloc> arg = car(last);
+  objectvptr arg = car(last);
   if (!listp(arg)) error(APPLY, PSTR("last argument is not a list"), arg);
   cdr(previous) = arg;
   return apply(APPLY, first(args), cdr(args), env);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_funcall (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_funcall (objectvptr args, objectvptr env) {
   return apply(FUNCALL, first(args), cdr(args), env);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_append (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_append (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> head = nil;
-  VPtr<object, SPIRAMVAlloc> tail;
+  objectvptr head = nil;
+  objectvptr tail = nil;
   while (args != nil) {   
-    VPtr<object, SPIRAMVAlloc> list = first(args);
+    objectvptr list = first(args);
     if (!listp(list)) error(APPEND, notalist, list);
     while (consp(list)) {
-      VPtr<object, SPIRAMVAlloc> obj = cons(car(list), cdr(list));
+      objectvptr obj = cons(car(list), cdr(list));
       if (head == nil) head = obj;
       else cdr(tail) = obj;
       tail = obj;
@@ -1975,24 +1979,24 @@ VPtr<object, SPIRAMVAlloc> fn_append (VPtr<object, SPIRAMVAlloc> args, VPtr<obje
   return head;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_mapc (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> function = first(args);
+objectvptr fn_mapc (objectvptr args, objectvptr env) {
+  objectvptr function = first(args);
   args = cdr(args);
-  VPtr<object, SPIRAMVAlloc> result = first(args);
-  VPtr<object, SPIRAMVAlloc> params = cons(nil, nil);
+  objectvptr result = first(args);
+  objectvptr params = cons(nil, nil);
   push(params,GCStack);
   // Make parameters
   while (true) {
-    VPtr<object, SPIRAMVAlloc> tailp = params;
-    VPtr<object, SPIRAMVAlloc> lists = args;
+    objectvptr tailp = params;
+    objectvptr lists = args;
     while (lists != nil) {
-      VPtr<object, SPIRAMVAlloc> list = car(lists);
+      objectvptr list = car(lists);
       if (list == nil) {
          pop(GCStack);
          return result;
       }
       if (improperp(list)) error(MAPC, notproper, list);
-      VPtr<object, SPIRAMVAlloc> obj = cons(first(list),nil);
+      objectvptr obj = cons(first(list),nil);
       car(lists) = cdr(list);
       cdr(tailp) = obj; tailp = obj;
       lists = cdr(lists);
@@ -2001,63 +2005,63 @@ VPtr<object, SPIRAMVAlloc> fn_mapc (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   }
 }
 
-VPtr<object, SPIRAMVAlloc> fn_mapcar (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> function = first(args);
+objectvptr fn_mapcar (objectvptr args, objectvptr env) {
+  objectvptr function = first(args);
   args = cdr(args);
-  VPtr<object, SPIRAMVAlloc> params = cons(nil, nil);
+  objectvptr params = cons(nil, nil);
   push(params,GCStack);
-  VPtr<object, SPIRAMVAlloc> head = cons(nil, nil); 
+  objectvptr head = cons(nil, nil); 
   push(head,GCStack);
-  VPtr<object, SPIRAMVAlloc> tail = head;
+  objectvptr tail = head;
   // Make parameters
   while (true) {
-    VPtr<object, SPIRAMVAlloc> tailp = params;
-    VPtr<object, SPIRAMVAlloc> lists = args;
+    objectvptr tailp = params;
+    objectvptr lists = args;
     while (lists != nil) {
-      VPtr<object, SPIRAMVAlloc> list = car(lists);
+      objectvptr list = car(lists);
       if (list == nil) {
          pop(GCStack);
          pop(GCStack);
          return cdr(head);
       }
       if (improperp(list)) error(MAPCAR, notproper, list);
-      VPtr<object, SPIRAMVAlloc> obj = cons(first(list),nil);
+      objectvptr obj = cons(first(list),nil);
       car(lists) = cdr(list);
       cdr(tailp) = obj; tailp = obj;
       lists = cdr(lists);
     }
-    VPtr<object, SPIRAMVAlloc> result = apply(MAPCAR, function, cdr(params), env);
-    VPtr<object, SPIRAMVAlloc> obj = cons(result,nil);
+    objectvptr result = apply(MAPCAR, function, cdr(params), env);
+    objectvptr obj = cons(result,nil);
     cdr(tail) = obj; tail = obj;
   }
 }
 
-VPtr<object, SPIRAMVAlloc> fn_mapcan (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> function = first(args);
+objectvptr fn_mapcan (objectvptr args, objectvptr env) {
+  objectvptr function = first(args);
   args = cdr(args);
-  VPtr<object, SPIRAMVAlloc> params = cons(nil, nil);
+  objectvptr params = cons(nil, nil);
   push(params,GCStack);
-  VPtr<object, SPIRAMVAlloc> head = cons(nil, nil); 
+  objectvptr head = cons(nil, nil); 
   push(head,GCStack);
-  VPtr<object, SPIRAMVAlloc> tail = head;
+  objectvptr tail = head;
   // Make parameters
   while (true) {
-    VPtr<object, SPIRAMVAlloc> tailp = params;
-    VPtr<object, SPIRAMVAlloc> lists = args;
+    objectvptr tailp = params;
+    objectvptr lists = args;
     while (lists != nil) {
-      VPtr<object, SPIRAMVAlloc> list = car(lists);
+      objectvptr list = car(lists);
       if (list == nil) {
          pop(GCStack);
          pop(GCStack);
          return cdr(head);
       }
       if (improperp(list)) error(MAPCAN, notproper, list);
-      VPtr<object, SPIRAMVAlloc> obj = cons(first(list),nil);
+      objectvptr obj = cons(first(list),nil);
       car(lists) = cdr(list);
       cdr(tailp) = obj; tailp = obj;
       lists = cdr(lists);
     }
-    VPtr<object, SPIRAMVAlloc> result = apply(MAPCAN, function, cdr(params), env);
+    objectvptr result = apply(MAPCAN, function, cdr(params), env);
     while (consp(result)) {
       cdr(tail) = result; tail = result;
       result = cdr(result);
@@ -2068,20 +2072,20 @@ VPtr<object, SPIRAMVAlloc> fn_mapcan (VPtr<object, SPIRAMVAlloc> args, VPtr<obje
 
 // Arithmetic functions
 
-VPtr<object, SPIRAMVAlloc> add_floats (VPtr<object, SPIRAMVAlloc> args, float fresult) {
+objectvptr add_floats (objectvptr args, float fresult) {
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg = car(args);
+    objectvptr arg = car(args);
     fresult = fresult + checkintfloat(ADD, arg);
     args = cdr(args);
   }
   return makefloat(fresult);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_add (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_add (objectvptr args, objectvptr env) {
   (void) env;
   int result = 0;
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg = car(args);
+    objectvptr arg = car(args);
     if (floatp(arg)) return add_floats(args, (float)result);
     else if (integerp(arg)) {
       int val = arg->val.integer;
@@ -2094,16 +2098,16 @@ VPtr<object, SPIRAMVAlloc> fn_add (VPtr<object, SPIRAMVAlloc> args, VPtr<object,
   return number(result);
 }
 
-VPtr<object, SPIRAMVAlloc> subtract_floats (VPtr<object, SPIRAMVAlloc> args, float fresult) {
+objectvptr subtract_floats (objectvptr args, float fresult) {
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg = car(args);
+    objectvptr arg = car(args);
     fresult = fresult - checkintfloat(SUBTRACT, arg);
     args = cdr(args);
   }
   return makefloat(fresult);
 }
 
-VPtr<object, SPIRAMVAlloc> negate (VPtr<object, SPIRAMVAlloc> arg) {
+objectvptr negate (objectvptr arg) {
   if (integerp(arg)) {
     int result = arg->val.integer;
     if (result == INT_MIN) return makefloat(-result);
@@ -2113,9 +2117,9 @@ VPtr<object, SPIRAMVAlloc> negate (VPtr<object, SPIRAMVAlloc> arg) {
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_subtract (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_subtract (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = car(args);
+  objectvptr arg = car(args);
   args = cdr(args);
   if (args == nil) return negate(arg);
   else if (floatp(arg)) return subtract_floats(args, arg->val.single_float);
@@ -2137,20 +2141,20 @@ VPtr<object, SPIRAMVAlloc> fn_subtract (VPtr<object, SPIRAMVAlloc> args, VPtr<ob
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> multiply_floats (VPtr<object, SPIRAMVAlloc> args, float fresult) {
+objectvptr multiply_floats (objectvptr args, float fresult) {
   while (args != nil) {
-   VPtr<object, SPIRAMVAlloc> arg = car(args);
+   objectvptr arg = car(args);
     fresult = fresult * checkintfloat(MULTIPLY, arg);
     args = cdr(args);
   }
   return makefloat(fresult);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_multiply (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_multiply (objectvptr args, objectvptr env) {
   (void) env;
   int result = 1;
   while (args != nil){
-    VPtr<object, SPIRAMVAlloc> arg = car(args);
+    objectvptr arg = car(args);
     if (floatp(arg)) return multiply_floats(args, result);
     else if (integerp(arg)) {
       int64_t val = result * (int64_t)(arg->val.integer);
@@ -2162,9 +2166,9 @@ VPtr<object, SPIRAMVAlloc> fn_multiply (VPtr<object, SPIRAMVAlloc> args, VPtr<ob
   return number(result);
 }
 
-VPtr<object, SPIRAMVAlloc> divide_floats (VPtr<object, SPIRAMVAlloc> args, float fresult) {
+objectvptr divide_floats (objectvptr args, float fresult) {
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg = car(args);
+    objectvptr arg = car(args);
     float f = checkintfloat(DIVIDE, arg);
     if (f == 0.0) error2(DIVIDE, PSTR("division by zero"));
     fresult = fresult / f;
@@ -2173,9 +2177,9 @@ VPtr<object, SPIRAMVAlloc> divide_floats (VPtr<object, SPIRAMVAlloc> args, float
   return makefloat(fresult);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_divide (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_divide (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   args = cdr(args);
   // One argument
   if (args == nil) {
@@ -2212,10 +2216,10 @@ VPtr<object, SPIRAMVAlloc> fn_divide (VPtr<object, SPIRAMVAlloc> args, VPtr<obje
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_mod (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_mod (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args);
-  VPtr<object, SPIRAMVAlloc> arg2 = second(args);
+  objectvptr arg1 = first(args);
+  objectvptr arg2 = second(args);
   if (integerp(arg1) && integerp(arg2)) {
     int divisor = arg2->val.integer;
     if (divisor == 0) error2(MOD, PSTR("division by zero"));
@@ -2233,9 +2237,9 @@ VPtr<object, SPIRAMVAlloc> fn_mod (VPtr<object, SPIRAMVAlloc> args, VPtr<object,
   }
 }
 
-VPtr<object, SPIRAMVAlloc> fn_oneplus (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_oneplus (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (floatp(arg)) return makefloat((arg->val.single_float) + 1.0);
   else if (integerp(arg)) {
     int result = arg->val.integer;
@@ -2245,9 +2249,9 @@ VPtr<object, SPIRAMVAlloc> fn_oneplus (VPtr<object, SPIRAMVAlloc> args, VPtr<obj
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_oneminus (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_oneminus (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (floatp(arg)) return makefloat((arg->val.single_float) - 1.0);
   else if (integerp(arg)) {
     int result = arg->val.integer;
@@ -2257,9 +2261,9 @@ VPtr<object, SPIRAMVAlloc> fn_oneminus (VPtr<object, SPIRAMVAlloc> args, VPtr<ob
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_abs (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_abs (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (floatp(arg)) return makefloat(abs(arg->val.single_float));
   else if (integerp(arg)) {
     int result = arg->val.integer;
@@ -2269,21 +2273,21 @@ VPtr<object, SPIRAMVAlloc> fn_abs (VPtr<object, SPIRAMVAlloc> args, VPtr<object,
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_random (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_random (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (integerp(arg)) return number(random(arg->val.integer));
   else if (floatp(arg)) return makefloat((float)rand()/(float)(RAND_MAX/(arg->val.single_float)));
   else error(RANDOM, notanumber, arg);
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_maxfn (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_maxfn (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> result = first(args);
+  objectvptr result = first(args);
   args = cdr(args);
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg = car(args);
+    objectvptr arg = car(args);
     if (integerp(result) && integerp(arg)) {
       if ((arg->val.integer) > (result->val.integer)) result = arg;
     } else if ((checkintfloat(MAXFN, arg) > checkintfloat(MAXFN, result))) result = arg;
@@ -2292,12 +2296,12 @@ VPtr<object, SPIRAMVAlloc> fn_maxfn (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
   return result;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_minfn (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_minfn (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> result = first(args);
+  objectvptr result = first(args);
   args = cdr(args);
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg = car(args);
+    objectvptr arg = car(args);
     if (integerp(result) && integerp(arg)) {
       if ((arg->val.integer) < (result->val.integer)) result = arg;
     } else if ((checkintfloat(MINFN, arg) < checkintfloat(MINFN, result))) result = arg;
@@ -2308,16 +2312,16 @@ VPtr<object, SPIRAMVAlloc> fn_minfn (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
 
 // Arithmetic comparisons
 
-VPtr<object, SPIRAMVAlloc> fn_noteq (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_noteq (objectvptr args, objectvptr env) {
   (void) env;
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> nargs = args;
-    VPtr<object, SPIRAMVAlloc> arg1 = first(nargs);
+    objectvptr nargs = args;
+    objectvptr arg1 = first(nargs);
     nargs = cdr(nargs);
     while (nargs != nil) {
-      VPtr<object, SPIRAMVAlloc> arg2 = first(nargs);
+      objectvptr arg2 = first(nargs);
       if (integerp(arg1) && integerp(arg2)) {
-        if ((arg1->val.integer) == (arg2->val.integer)) return (VPtr<object, SPIRAMVAlloc>)nil;
+        if ((arg1->val.integer) == (arg2->val.integer)) return (objectvptr)nil;
       } else if ((checkintfloat(NOTEQ, arg1) == checkintfloat(NOTEQ, arg2))) return nil;
       nargs = cdr(nargs);
     }
@@ -2326,12 +2330,12 @@ VPtr<object, SPIRAMVAlloc> fn_noteq (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
   return tee;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_numeq (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_numeq (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args);
+  objectvptr arg1 = first(args);
   args = cdr(args);
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg2 = first(args);
+    objectvptr arg2 = first(args);
     if (integerp(arg1) && integerp(arg2)) {
       if (!((arg1->val.integer) == (arg2->val.integer))) return nil;
     } else if (!(checkintfloat(NUMEQ, arg1) == checkintfloat(NUMEQ, arg2))) return nil;
@@ -2341,12 +2345,12 @@ VPtr<object, SPIRAMVAlloc> fn_numeq (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
   return tee;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_less (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_less (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args);
+  objectvptr arg1 = first(args);
   args = cdr(args);
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg2 = first(args);
+    objectvptr arg2 = first(args);
     if (integerp(arg1) && integerp(arg2)) {
       if (!((arg1->val.integer) < (arg2->val.integer))) return nil;
     } else if (!(checkintfloat(LESS, arg1) < checkintfloat(LESS, arg2))) return nil;
@@ -2356,12 +2360,12 @@ VPtr<object, SPIRAMVAlloc> fn_less (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   return tee;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_lesseq (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_lesseq (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args);
+  objectvptr arg1 = first(args);
   args = cdr(args);
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg2 = first(args);
+    objectvptr arg2 = first(args);
     if (integerp(arg1) && integerp(arg2)) {
       if (!((arg1->val.integer) <= (arg2->val.integer))) return nil;
     } else if (!(checkintfloat(LESSEQ, arg1) <= checkintfloat(LESSEQ, arg2))) return nil;
@@ -2371,12 +2375,12 @@ VPtr<object, SPIRAMVAlloc> fn_lesseq (VPtr<object, SPIRAMVAlloc> args, VPtr<obje
   return tee;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_greater (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_greater (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args);
+  objectvptr arg1 = first(args);
   args = cdr(args);
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg2 = first(args);
+    objectvptr arg2 = first(args);
     if (integerp(arg1) && integerp(arg2)) {
       if (!((arg1->val.integer) > (arg2->val.integer))) return nil;
     } else if (!(checkintfloat(GREATER, arg1) > checkintfloat(GREATER, arg2))) return nil;
@@ -2386,12 +2390,12 @@ VPtr<object, SPIRAMVAlloc> fn_greater (VPtr<object, SPIRAMVAlloc> args, VPtr<obj
   return tee;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_greatereq (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_greatereq (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args);
+  objectvptr arg1 = first(args);
   args = cdr(args);
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> arg2 = first(args);
+    objectvptr arg2 = first(args);
     if (integerp(arg1) && integerp(arg2)) {
       if (!((arg1->val.integer) >= (arg2->val.integer))) return nil;
     } else if (!(checkintfloat(GREATEREQ, arg1) >= checkintfloat(GREATEREQ, arg2))) return nil;
@@ -2401,40 +2405,40 @@ VPtr<object, SPIRAMVAlloc> fn_greatereq (VPtr<object, SPIRAMVAlloc> args, VPtr<o
   return tee;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_plusp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_plusp (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (floatp(arg)) return ((arg->val.single_float) > 0.0) ? tee : nil;
   else if (integerp(arg)) return ((arg->val.integer) > 0) ? tee : nil;
   else error(PLUSP, notanumber, arg);
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_minusp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_minusp (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
-  if (floatp(arg)) return ((arg->val.single_float) < 0.0) ? tee : (VPtr<object, SPIRAMVAlloc>)nil;
+  objectvptr arg = first(args);
+  if (floatp(arg)) return ((arg->val.single_float) < 0.0) ? tee : (objectvptr)nil;
   else if (integerp(arg)) return ((arg->val.integer) < 0) ? tee : nil;
   else error(MINUSP, notanumber, arg);
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_zerop (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_zerop (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (floatp(arg)) return (((arg->val.single_float) == 0.0) ? tee : nil);
   else if (integerp(arg)) return ((arg->val.integer) == 0) ? tee : nil;
   else error(ZEROP, notanumber, arg);
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_oddp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_oddp (objectvptr args, objectvptr env) {
   (void) env;
   int arg = checkinteger(ODDP, first(args));
   return ((arg & 1) == 1) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_evenp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_evenp (objectvptr args, objectvptr env) {
   (void) env;
   int arg = checkinteger(EVENP, first(args));
   return ((arg & 1) == 0) ? tee : nil;
@@ -2442,92 +2446,92 @@ VPtr<object, SPIRAMVAlloc> fn_evenp (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
 
 // Number functions
 
-VPtr<object, SPIRAMVAlloc> fn_integerp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_integerp (objectvptr args, objectvptr env) {
   (void) env;
   return integerp(first(args)) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_numberp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_numberp (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   return (integerp(arg) || floatp(arg)) ? tee : nil;
 }
 
 // Floating-point functions
 
-VPtr<object, SPIRAMVAlloc> fn_floatfn (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_floatfn (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   return (floatp(arg)) ? arg : makefloat((float)(arg->val.integer));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_floatp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_floatp (objectvptr args, objectvptr env) {
   (void) env;
   return floatp(first(args)) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_sin (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_sin (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(sin(checkintfloat(SIN, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cos (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cos (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(cos(checkintfloat(COS, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_tan (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_tan (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(tan(checkintfloat(TAN, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_asin (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_asin (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(asin(checkintfloat(ASIN, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_acos (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_acos (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(acos(checkintfloat(ACOS, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_atan (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_atan (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   float div = 1.0;
   args = cdr(args);
   if (args != nil) div = checkintfloat(ATAN, first(args));
   return makefloat(atan2(checkintfloat(ATAN, arg), div));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_sinh (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_sinh (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(sinh(checkintfloat(SINH, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cosh (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cosh (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(cosh(checkintfloat(COSH, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_tanh (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_tanh (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(tanh(checkintfloat(TANH, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_exp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_exp (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(exp(checkintfloat(EXP, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_sqrt (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_sqrt (objectvptr args, objectvptr env) {
   (void) env;
   return makefloat(sqrt(checkintfloat(SQRT, first(args))));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_log (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_log (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   float fresult = log(checkintfloat(LOG, arg));
   args = cdr(args);
   if (args == nil) return makefloat(fresult);
@@ -2544,9 +2548,9 @@ int intpower (int base, int exp) {
   return result;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_expt (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_expt (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args); VPtr<object, SPIRAMVAlloc> arg2 = second(args);
+  objectvptr arg1 = first(args); objectvptr arg2 = second(args);
   float float1 = checkintfloat(EXPT, arg1);
   float value = log(abs(float1)) * checkintfloat(EXPT, arg2);
   if (integerp(arg1) && integerp(arg2) && ((arg2->val.integer) > 0) && (abs(value) < 21.4875)) 
@@ -2555,25 +2559,25 @@ VPtr<object, SPIRAMVAlloc> fn_expt (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   return makefloat(exp(value));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_ceiling (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_ceiling (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   args = cdr(args);
   if (args != nil) return number(ceil(checkintfloat(CEILING, arg) / checkintfloat(CEILING, first(args))));
   else return number(ceil(checkintfloat(CEILING, arg)));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_floor (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_floor (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   args = cdr(args);
   if (args != nil) return number(floor(checkintfloat(FLOOR, arg) / checkintfloat(FLOOR, first(args))));
   else return number(floor(checkintfloat(FLOOR, arg)));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_truncate (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_truncate (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   args = cdr(args);
   if (args != nil) return number((int)(checkintfloat(TRUNCATE, arg) / checkintfloat(TRUNCATE, first(args))));
   else return number((int)(checkintfloat(TRUNCATE, arg)));
@@ -2583,9 +2587,9 @@ int myround (float number) {
   return (number >= 0) ? (int)(number + 0.5) : (int)(number - 0.5);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_round (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_round (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   args = cdr(args);
   if (args != nil) return number(myround(checkintfloat(ROUND, arg) / checkintfloat(ROUND, first(args))));
   else return number(myround(checkintfloat(ROUND, arg)));
@@ -2593,40 +2597,40 @@ VPtr<object, SPIRAMVAlloc> fn_round (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
 
 // Characters
 
-VPtr<object, SPIRAMVAlloc> fn_char (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_char (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (!stringp(arg)) error(CHAR, notastring, arg);
   char c = nthchar(arg, checkinteger(CHAR, second(args)));
   if (c == 0) error2(CHAR, PSTR("index out of range"));
   return character(c);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_charcode (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_charcode (objectvptr args, objectvptr env) {
   (void) env;
   return number(checkchar(CHARCODE, first(args)));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_codechar (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_codechar (objectvptr args, objectvptr env) {
   (void) env;
   return character(checkinteger(CODECHAR, first(args)));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_characterp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_characterp (objectvptr args, objectvptr env) {
   (void) env;
   return characterp(first(args)) ? tee : nil;
 }
 
 // Strings
 
-VPtr<object, SPIRAMVAlloc> fn_stringp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_stringp (objectvptr args, objectvptr env) {
   (void) env;
   return stringp(first(args)) ? tee : nil;
 }
 
-bool stringcompare (symbol_t name, VPtr<object, SPIRAMVAlloc> args, bool lt, bool gt, bool eq) {
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args); if (!stringp(arg1)) error(name, notastring, arg1);
-  VPtr<object, SPIRAMVAlloc> arg2 = second(args); if (!stringp(arg2)) error(name, notastring, arg2); 
+bool stringcompare (symbol_t name, objectvptr args, bool lt, bool gt, bool eq) {
+  objectvptr arg1 = first(args); if (!stringp(arg1)) error(name, notastring, arg1);
+  objectvptr arg2 = second(args); if (!stringp(arg2)) error(name, notastring, arg2); 
   arg1 = cdr(arg1);
   arg2 = cdr(arg2);
   while ((arg1 != nil) || (arg2 != nil)) {
@@ -2640,31 +2644,31 @@ bool stringcompare (symbol_t name, VPtr<object, SPIRAMVAlloc> args, bool lt, boo
   return eq;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_stringeq (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_stringeq (objectvptr args, objectvptr env) {
   (void) env;
   return stringcompare(STRINGEQ, args, false, false, true) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_stringless (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_stringless (objectvptr args, objectvptr env) {
   (void) env;
   return stringcompare(STRINGLESS, args, true, false, false) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_stringgreater (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_stringgreater (objectvptr args, objectvptr env) {
   (void) env;
   return stringcompare(STRINGGREATER, args, false, true, false) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_sort (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_sort (objectvptr args, objectvptr env) {
   if (first(args) == nil) return nil;
-  VPtr<object, SPIRAMVAlloc> list = cons(nil,first(args));
+  objectvptr list = cons(nil,first(args));
   push(list,GCStack);
-  VPtr<object, SPIRAMVAlloc> predicate = second(args);
-  VPtr<object, SPIRAMVAlloc> compare = cons(nil, cons(nil, nil));
+  objectvptr predicate = second(args);
+  objectvptr compare = cons(nil, cons(nil, nil));
   push(compare,GCStack);
-  VPtr<object, SPIRAMVAlloc> ptr = cdr(list);
+  objectvptr ptr = cdr(list);
   while (cdr(ptr) != nil) {
-    VPtr<object, SPIRAMVAlloc> go = list;
+    objectvptr go = list;
     while (go != ptr) {
       car(compare) = car(cdr(ptr));
       car(cdr(compare)) = car(cdr(go));
@@ -2672,7 +2676,7 @@ VPtr<object, SPIRAMVAlloc> fn_sort (VPtr<object, SPIRAMVAlloc> args, VPtr<object
       go = cdr(go);
     }
     if (go != ptr) {
-      VPtr<object, SPIRAMVAlloc> obj = cdr(ptr);
+      objectvptr obj = cdr(ptr);
       cdr(ptr) = cdr(obj);
       cdr(obj) = cdr(go);
       cdr(go) = obj;
@@ -2682,15 +2686,15 @@ VPtr<object, SPIRAMVAlloc> fn_sort (VPtr<object, SPIRAMVAlloc> args, VPtr<object
   return cdr(list);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_stringfn (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_stringfn (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   int type = arg->val.type;
   if (type == STRING) return arg;
-  VPtr<object, SPIRAMVAlloc> obj = myalloc();
+  objectvptr obj = myalloc();
   obj->val.type = STRING;
   if (type == CHARACTER) {
-    VPtr<object, SPIRAMVAlloc> cell = myalloc();
+    objectvptr cell = myalloc();
     cell->ptr.car = nil;
     uint8_t shift = (sizeof(int)-1)*8;
     cell->val.integer = (arg->val.integer)<<shift;
@@ -2698,7 +2702,7 @@ VPtr<object, SPIRAMVAlloc> fn_stringfn (VPtr<object, SPIRAMVAlloc> args, VPtr<ob
   } else if (type == SYMBOL) {
     char *s = symbolname(arg->val.name);
     char ch = *s++;
-    VPtr<object, SPIRAMVAlloc> head = nil;
+    objectvptr head = nil;
     int chars = 0;
     while (ch) {
       if (ch == '\\') ch = *s++;
@@ -2710,18 +2714,18 @@ VPtr<object, SPIRAMVAlloc> fn_stringfn (VPtr<object, SPIRAMVAlloc> args, VPtr<ob
   return obj;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_concatenate (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_concatenate (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   symbol_t name = arg->val.name;
   if (name != STRINGFN) error2(CONCATENATE, PSTR("only supports strings"));
   args = cdr(args);
-  VPtr<object, SPIRAMVAlloc> result = myalloc();
+  objectvptr result = myalloc();
   result->val.type = STRING;
-  VPtr<object, SPIRAMVAlloc> head = nil;
+  objectvptr head = nil;
   int chars = 0;
   while (args != nil) {
-    VPtr<object, SPIRAMVAlloc> obj = first(args);
+    objectvptr obj = first(args);
     if (obj->val.type != STRING) error(CONCATENATE, notastring, obj);
     obj = cdr(obj);
     while (obj != nil) {
@@ -2739,17 +2743,17 @@ VPtr<object, SPIRAMVAlloc> fn_concatenate (VPtr<object, SPIRAMVAlloc> args, VPtr
   return result;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_subseq (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_subseq (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (!stringp(arg)) error(SUBSEQ, notastring, arg);
   int start = checkinteger(SUBSEQ, second(args));
   int end;
   args = cddr(args);
   if (args != nil) end = checkinteger(SUBSEQ, car(args)); else end = stringlength(arg);
-  VPtr<object, SPIRAMVAlloc> result = myalloc();
+  objectvptr result = myalloc();
   result->val.type = STRING;
-  VPtr<object, SPIRAMVAlloc> head = nil;
+  objectvptr head = nil;
   int chars = 0;
   for (int i=start; i<end; i++) {
     char ch = nthchar(arg, i);
@@ -2770,9 +2774,9 @@ int gstr () {
   return (c != 0) ? c : '\n'; // -1?
 }
 
-VPtr<object, SPIRAMVAlloc> fn_readfromstring (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {   
+objectvptr fn_readfromstring (objectvptr args, objectvptr env) {   
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
+  objectvptr arg = first(args);
   if (!stringp(arg)) error(READFROMSTRING, notastring, arg);
   GlobalString = arg;
   GlobalStringIndex = 0;
@@ -2783,10 +2787,10 @@ void pstr (char c) {
   buildstring(c, &GlobalStringIndex, &GlobalString);
 }
  
-VPtr<object, SPIRAMVAlloc> fn_princtostring (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {   
+objectvptr fn_princtostring (objectvptr args, objectvptr env) {   
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
-  VPtr<object, SPIRAMVAlloc> obj = myalloc();
+  objectvptr arg = first(args);
+  objectvptr obj = myalloc();
   obj->val.type = STRING;
   GlobalString = nil;
   GlobalStringIndex = 0;
@@ -2798,10 +2802,10 @@ VPtr<object, SPIRAMVAlloc> fn_princtostring (VPtr<object, SPIRAMVAlloc> args, VP
   return obj;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_prin1tostring (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {   
+objectvptr fn_prin1tostring (objectvptr args, objectvptr env) {   
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
-  VPtr<object, SPIRAMVAlloc> obj = myalloc();
+  objectvptr arg = first(args);
+  objectvptr obj = myalloc();
   obj->val.type = STRING;
   GlobalString = nil;
   GlobalStringIndex = 0;
@@ -2812,7 +2816,7 @@ VPtr<object, SPIRAMVAlloc> fn_prin1tostring (VPtr<object, SPIRAMVAlloc> args, VP
 
 // Bitwise operators
 
-VPtr<object, SPIRAMVAlloc> fn_logand (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_logand (objectvptr args, objectvptr env) {
   (void) env;
   int result = -1;
   while (args != nil) {
@@ -2822,7 +2826,7 @@ VPtr<object, SPIRAMVAlloc> fn_logand (VPtr<object, SPIRAMVAlloc> args, VPtr<obje
   return number(result);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_logior (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_logior (objectvptr args, objectvptr env) {
   (void) env;
   int result = 0;
   while (args != nil) {
@@ -2832,7 +2836,7 @@ VPtr<object, SPIRAMVAlloc> fn_logior (VPtr<object, SPIRAMVAlloc> args, VPtr<obje
   return number(result);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_logxor (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_logxor (objectvptr args, objectvptr env) {
   (void) env;
   int result = 0;
   while (args != nil) {
@@ -2842,13 +2846,13 @@ VPtr<object, SPIRAMVAlloc> fn_logxor (VPtr<object, SPIRAMVAlloc> args, VPtr<obje
   return number(result);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_lognot (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_lognot (objectvptr args, objectvptr env) {
   (void) env;
   int result = checkinteger(LOGNOT, car(args));
   return number(~result);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_ash (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_ash (objectvptr args, objectvptr env) {
   (void) env;
   int value = checkinteger(ASH, first(args));
   int count = checkinteger(ASH, second(args));
@@ -2856,7 +2860,7 @@ VPtr<object, SPIRAMVAlloc> fn_ash (VPtr<object, SPIRAMVAlloc> args, VPtr<object,
   else return number(value >> abs(count));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_logbitp (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_logbitp (objectvptr args, objectvptr env) {
   (void) env;
   int index = checkinteger(LOGBITP, first(args));
   int value = checkinteger(LOGBITP, second(args));
@@ -2865,29 +2869,29 @@ VPtr<object, SPIRAMVAlloc> fn_logbitp (VPtr<object, SPIRAMVAlloc> args, VPtr<obj
 
 // System functions
 
-VPtr<object, SPIRAMVAlloc> fn_eval (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_eval (objectvptr args, objectvptr env) {
   return eval(first(args), env);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_globals (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_globals (objectvptr args, objectvptr env) {
   (void) args;
   if (GlobalEnv == nil) return nil;
   return fn_mapcar(cons(symbol(CAR),cons(GlobalEnv,nil)), env);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_locals (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_locals (objectvptr args, objectvptr env) {
   (void) args;
   return env;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_makunbound (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_makunbound (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> key = first(args);
+  objectvptr key = first(args);
   delassoc(key, &GlobalEnv);
   return key;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_break (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_break (objectvptr args, objectvptr env) {
   (void) args;
   pfstring(PSTR("\rBreak!\r"), pserial);
   BreakLevel++;
@@ -2896,23 +2900,23 @@ VPtr<object, SPIRAMVAlloc> fn_break (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_read (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_read (objectvptr args, objectvptr env) {
   (void) env;
   gfun_t gfun = gstreamfun(args);
   return read(gfun);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_prin1 (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_prin1 (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> obj = first(args);
+  objectvptr obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
   printobject(obj, pfun);
   return obj;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_print (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_print (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> obj = first(args);
+  objectvptr obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
   pln(pfun);
   printobject(obj, pfun);
@@ -2920,9 +2924,9 @@ VPtr<object, SPIRAMVAlloc> fn_print (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
   return obj;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_princ (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_princ (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> obj = first(args);
+  objectvptr obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
   char temp = Flags;
   clrflag(PRINTREADABLY);
@@ -2931,27 +2935,27 @@ VPtr<object, SPIRAMVAlloc> fn_princ (VPtr<object, SPIRAMVAlloc> args, VPtr<objec
   return obj;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_terpri (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_terpri (objectvptr args, objectvptr env) {
   (void) env;
   pfun_t pfun = pstreamfun(args);
   pln(pfun);
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_readbyte (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_readbyte (objectvptr args, objectvptr env) {
   (void) env;
   gfun_t gfun = gstreamfun(args);
   int c = gfun();
   return (c == -1) ? nil : number(c);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_readline (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_readline (objectvptr args, objectvptr env) {
   (void) env;
   gfun_t gfun = gstreamfun(args);
   return readstring('\n', gfun);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_writebyte (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_writebyte (objectvptr args, objectvptr env) {
   (void) env;
   int value = checkinteger(WRITEBYTE, first(args));
   pfun_t pfun = pstreamfun(cdr(args));
@@ -2959,9 +2963,9 @@ VPtr<object, SPIRAMVAlloc> fn_writebyte (VPtr<object, SPIRAMVAlloc> args, VPtr<o
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_writestring (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_writestring (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> obj = first(args);
+  objectvptr obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
   char temp = Flags;
   clrflag(PRINTREADABLY);
@@ -2970,9 +2974,9 @@ VPtr<object, SPIRAMVAlloc> fn_writestring (VPtr<object, SPIRAMVAlloc> args, VPtr
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_writeline (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_writeline (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> obj = first(args);
+  objectvptr obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
   char temp = Flags;
   clrflag(PRINTREADABLY);
@@ -2982,14 +2986,14 @@ VPtr<object, SPIRAMVAlloc> fn_writeline (VPtr<object, SPIRAMVAlloc> args, VPtr<o
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_restarti2c (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_restarti2c (objectvptr args, objectvptr env) {
   (void) env;
   int stream = first(args)->val.integer;
   args = cdr(args);
   int read = 0; // Write
   I2CCount = 0;
   if (args != nil) {
-    VPtr<object, SPIRAMVAlloc> rw = first(args);
+    objectvptr rw = first(args);
     if (integerp(rw)) I2CCount = rw->val.integer;
     read = (rw != nil);
   }
@@ -2998,7 +3002,7 @@ VPtr<object, SPIRAMVAlloc> fn_restarti2c (VPtr<object, SPIRAMVAlloc> args, VPtr<
   return I2Crestart(address, read) ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_gc (VPtr<object, SPIRAMVAlloc> obj, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_gc (objectvptr obj, objectvptr env) {
   int initial = Freespace;
   unsigned long start = micros();
   gc(obj, env);
@@ -3011,23 +3015,23 @@ VPtr<object, SPIRAMVAlloc> fn_gc (VPtr<object, SPIRAMVAlloc> obj, VPtr<object, S
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_room (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_room (objectvptr args, objectvptr env) {
   (void) args, (void) env;
   return number(Freespace);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_saveimage (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_saveimage (objectvptr args, objectvptr env) {
   if (args != nil) args = eval(first(args), env);
   return number(saveimage(args));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_loadimage (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_loadimage (objectvptr args, objectvptr env) {
   (void) env;
   if (args != nil) args = first(args);
   return number(loadimage(args));
 }
 
-VPtr<object, SPIRAMVAlloc> fn_cls (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_cls (objectvptr args, objectvptr env) {
   (void) args, (void) env;
   pserial(12);
   return nil;
@@ -3035,11 +3039,11 @@ VPtr<object, SPIRAMVAlloc> fn_cls (VPtr<object, SPIRAMVAlloc> args, VPtr<object,
 
 // Arduino procedures
 
-VPtr<object, SPIRAMVAlloc> fn_pinmode (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_pinmode (objectvptr args, objectvptr env) {
   (void) env;
   int pin = checkinteger(PINMODE, first(args));
   PinMode pm = INPUT;
-  VPtr<object, SPIRAMVAlloc> mode = second(args);
+  objectvptr mode = second(args);
   if (integerp(mode)) {
     int nmode = mode->val.integer;
     if (nmode == 1) pm = OUTPUT; else if (nmode == 2) pm = INPUT_PULLUP;
@@ -3051,57 +3055,57 @@ VPtr<object, SPIRAMVAlloc> fn_pinmode (VPtr<object, SPIRAMVAlloc> args, VPtr<obj
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_digitalread (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_digitalread (objectvptr args, objectvptr env) {
   (void) env;
   int pin = checkinteger(DIGITALREAD, first(args));
   if (digitalRead(pin) != 0) return tee; else return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_digitalwrite (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_digitalwrite (objectvptr args, objectvptr env) {
   (void) env;
   int pin = checkinteger(DIGITALWRITE, first(args));
-  VPtr<object, SPIRAMVAlloc> mode = second(args);
+  objectvptr mode = second(args);
   if (integerp(mode)) digitalWrite(pin, mode->val.integer ? HIGH : LOW);
   else digitalWrite(pin, (mode != nil) ? HIGH : LOW);
   return mode;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_analogread (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_analogread (objectvptr args, objectvptr env) {
   (void) env;
   int pin = checkinteger(ANALOGREAD, first(args));
   checkanalogread(pin);
   return number(analogRead(pin));
 }
  
-VPtr<object, SPIRAMVAlloc> fn_analogwrite (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_analogwrite (objectvptr args, objectvptr env) {
   (void) env;
   int pin = checkinteger(ANALOGWRITE, first(args));
   checkanalogwrite(pin);
-  VPtr<object, SPIRAMVAlloc> value = second(args);
+  objectvptr value = second(args);
   analogWrite(pin, checkinteger(ANALOGWRITE, value));
   return value;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_delay (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_delay (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args);
+  objectvptr arg1 = first(args);
   delay(checkinteger(DELAY, arg1));
   return arg1;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_millis (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_millis (objectvptr args, objectvptr env) {
   (void) args, (void) env;
   return number(millis());
 }
 
-VPtr<object, SPIRAMVAlloc> fn_sleep (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_sleep (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> arg1 = first(args);
+  objectvptr arg1 = first(args);
   sleep(checkinteger(SLEEP, arg1));
   return arg1;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_note (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_note (objectvptr args, objectvptr env) {
   (void) env;
   static int pin = 255;
   if (args != nil) {
@@ -3117,16 +3121,16 @@ VPtr<object, SPIRAMVAlloc> fn_note (VPtr<object, SPIRAMVAlloc> args, VPtr<object
 
 // Tree Editor
 
-VPtr<object, SPIRAMVAlloc> fn_edit (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> fun = first(args);
-  VPtr<object, SPIRAMVAlloc> pair = findvalue(fun, env);
+objectvptr fn_edit (objectvptr args, objectvptr env) {
+  objectvptr fun = first(args);
+  objectvptr pair = findvalue(fun, env);
   clrflag(EXITEDITOR);
-  VPtr<object, SPIRAMVAlloc> arg = edit(eval(fun, env));
+  objectvptr arg = edit(eval(fun, env));
   cdr(pair) = arg;
   return arg;
 }
 
-VPtr<object, SPIRAMVAlloc> edit (VPtr<object, SPIRAMVAlloc> fun) {
+objectvptr edit (objectvptr fun) {
   while (1) {
     if (tstflag(EXITEDITOR)) return fun;
     char c = gserial();
@@ -3154,23 +3158,23 @@ void pcount (char c) {
   GlobalStringIndex++;
 }
   
-int atomwidth (VPtr<object, SPIRAMVAlloc> obj) {
+int atomwidth (objectvptr obj) {
   GlobalStringIndex = 0;
   printobject(obj, pcount);
   return GlobalStringIndex;
 }
 
-boolean quoted (VPtr<object, SPIRAMVAlloc> obj) {
+boolean quoted (objectvptr obj) {
   return (consp(obj) && car(obj) != nil && car(obj)->val.name == QUOTE && consp(cdr(obj)) && cddr(obj) == nil);
 }
 
-int subwidth (VPtr<object, SPIRAMVAlloc> obj, int w) {
+int subwidth (objectvptr obj, int w) {
   if (atom(obj)) return w - atomwidth(obj);
   if (quoted(obj)) return subwidthlist(car(cdr(obj)), w - 1);
   return subwidthlist(obj, w - 1);
 }
 
-int subwidthlist (VPtr<object, SPIRAMVAlloc> form, int w) {
+int subwidthlist (objectvptr form, int w) {
   while (form != nil && w >= 0) {
     if (atom(form)) return w - (2 + atomwidth(form));
     w = subwidth(car(form), w - 1);
@@ -3179,7 +3183,7 @@ int subwidthlist (VPtr<object, SPIRAMVAlloc> form, int w) {
   return w;
 }
 
-void superprint (VPtr<object, SPIRAMVAlloc> form, int lm, pfun_t pfun) {
+void superprint (objectvptr form, int lm, pfun_t pfun) {
   if (atom(form)) {
     if (symbolp(form) && form->val.name == NOTHING) pstring(symbolname(form->val.name), pfun);
     else printobject(form, pfun);
@@ -3193,9 +3197,9 @@ const int ppspecials = 17;
 const char ppspecial[ppspecials] PROGMEM = 
   { DOTIMES, DOLIST, IF, SETQ, TEE, LET, LETSTAR, LAMBDA, WHEN, UNLESS, WITHI2C, WITHSERIAL, WITHSPI, WITHSDCARD, WITHSPIFFS, FORMILLIS, WITHCLIENT };
 
-void supersub (VPtr<object, SPIRAMVAlloc> form, int lm, int super, pfun_t pfun) {
+void supersub (objectvptr form, int lm, int super, pfun_t pfun) {
   int special = 0, separate = 1;
-  VPtr<object, SPIRAMVAlloc> arg = car(form);
+  objectvptr arg = car(form);
   if (symbolp(arg)) {
     int name = arg->val.name;
     if (name == DEFUN) special = 2;
@@ -3215,22 +3219,22 @@ void supersub (VPtr<object, SPIRAMVAlloc> form, int lm, int super, pfun_t pfun) 
   pfun(')'); return;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_pprint (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_pprint (objectvptr args, objectvptr env) {
   (void) env;
-  VPtr<object, SPIRAMVAlloc> obj = first(args);
+  objectvptr obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
   pln(pfun);
   superprint(obj, 0, pfun);
   return symbol(NOTHING);
 }
 
-VPtr<object, SPIRAMVAlloc> fn_pprintall (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_pprintall (objectvptr args, objectvptr env) {
   (void) args, (void) env;
-  VPtr<object, SPIRAMVAlloc> globals = GlobalEnv;
+  objectvptr globals = GlobalEnv;
   while (globals != nil) {
-    VPtr<object, SPIRAMVAlloc> pair = first(globals);
-    VPtr<object, SPIRAMVAlloc> var = car(pair);
-    VPtr<object, SPIRAMVAlloc> val = cdr(pair);
+    objectvptr pair = first(globals);
+    objectvptr var = car(pair);
+    objectvptr val = cdr(pair);
     pln(pserial);
     if (consp(val) && symbolp(car(val)) && car(val)->val.name == LAMBDA) {
       superprint(cons(symbol(DEFUN), cons(var, cdr(val))), 0, pserial);
@@ -3246,18 +3250,18 @@ VPtr<object, SPIRAMVAlloc> fn_pprintall (VPtr<object, SPIRAMVAlloc> args, VPtr<o
 
 // LispLibrary
 
-VPtr<object, SPIRAMVAlloc> fn_require (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
-  VPtr<object, SPIRAMVAlloc> arg = first(args);
-  VPtr<object, SPIRAMVAlloc> globals = GlobalEnv;
+objectvptr fn_require (objectvptr args, objectvptr env) {
+  objectvptr arg = first(args);
+  objectvptr globals = GlobalEnv;
   if (!symbolp(arg)) error(REQUIRE, PSTR("argument is not a symbol"), arg);
   while (globals != nil) {
-    VPtr<object, SPIRAMVAlloc> pair = first(globals);
-    VPtr<object, SPIRAMVAlloc> var = car(pair);
+    objectvptr pair = first(globals);
+    objectvptr var = car(pair);
     if (symbolp(var) && var == arg) return nil;
     globals = cdr(globals);
   }
   GlobalStringIndex = 0;
-  VPtr<object, SPIRAMVAlloc> line = read(glibrary);
+  objectvptr line = read(glibrary);
   while (line != nil) {
     // Is this the definition we want
     int fname = first(line)->val.name;
@@ -3270,10 +3274,10 @@ VPtr<object, SPIRAMVAlloc> fn_require (VPtr<object, SPIRAMVAlloc> args, VPtr<obj
   return nil; 
 }
 
-VPtr<object, SPIRAMVAlloc> fn_listlibrary (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_listlibrary (objectvptr args, objectvptr env) {
   (void) args, (void) env;
   GlobalStringIndex = 0;
-  VPtr<object, SPIRAMVAlloc> line = read(glibrary);
+  objectvptr line = read(glibrary);
   while (line != nil) {
     int fname = first(line)->val.name;
     if (fname == DEFUN || fname == DEFVAR) {
@@ -3286,26 +3290,26 @@ VPtr<object, SPIRAMVAlloc> fn_listlibrary (VPtr<object, SPIRAMVAlloc> args, VPtr
 
 // Wi-fi
 
-VPtr<object, SPIRAMVAlloc> fn_available (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_available (objectvptr args, objectvptr env) {
   (void) env;
   if (isstream(first(args))>>8 != WIFISTREAM) error2(AVAILABLE, PSTR("invalid stream"));
   return number(client.available());
 }
 
-VPtr<object, SPIRAMVAlloc> fn_wifiserver (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_wifiserver (objectvptr args, objectvptr env) {
   (void) args, (void) env;
   server.begin();
   return nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_wifisoftap (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_wifisoftap (objectvptr args, objectvptr env) {
   (void) env;
   char ssid[33], pass[65];
   if (args == nil) return WiFi.softAPdisconnect(true) ? tee : nil;
-  VPtr<object, SPIRAMVAlloc> first = first(args); args = cdr(args);
+  objectvptr first = first(args); args = cdr(args);
   if (args == nil) WiFi.softAP(cstring(first, ssid, 33));
   else {
-    VPtr<object, SPIRAMVAlloc> second = first(args);
+    objectvptr second = first(args);
     args = cdr(args);
     int channel = 1;
     boolean hidden = false;
@@ -3319,18 +3323,18 @@ VPtr<object, SPIRAMVAlloc> fn_wifisoftap (VPtr<object, SPIRAMVAlloc> args, VPtr<
   return lispstring((char*)WiFi.softAPIP().toString().c_str());
 }
 
-VPtr<object, SPIRAMVAlloc> fn_connected (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_connected (objectvptr args, objectvptr env) {
   (void) env;
   if (isstream(first(args))>>8 != WIFISTREAM) error2(CONNECTED, PSTR("invalid stream"));
   return client.connected() ? tee : nil;
 }
 
-VPtr<object, SPIRAMVAlloc> fn_wifilocalip (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_wifilocalip (objectvptr args, objectvptr env) {
   (void) args, (void) env;
   return lispstring((char*)WiFi.localIP().toString().c_str());
 }
 
-VPtr<object, SPIRAMVAlloc> fn_wificonnect (VPtr<object, SPIRAMVAlloc> args, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr fn_wificonnect (objectvptr args, objectvptr env) {
   (void) env;
   char ssid[33], pass[65];
   if (args == nil) { WiFi.disconnect(true); return nil; }
@@ -3792,7 +3796,7 @@ void testescape () {
 
 uint8_t End;
 
-VPtr<object, SPIRAMVAlloc> eval (VPtr<object, SPIRAMVAlloc> form, VPtr<object, SPIRAMVAlloc> env) {
+objectvptr eval (objectvptr form, objectvptr env) {
   int TC=0;
   EVAL:
   yield(); // Needed on ESP8266 to avoid Soft WDT Reset
@@ -3812,7 +3816,7 @@ VPtr<object, SPIRAMVAlloc> eval (VPtr<object, SPIRAMVAlloc> form, VPtr<object, S
   if (symbolp(form)) {
     symbol_t name = form->val.name;
     if (name == NIL) return nil;
-    VPtr<object, SPIRAMVAlloc> pair = value(name, env);
+    objectvptr pair = value(name, env);
     if (pair != nil) return cdr(pair);
     pair = value(name, GlobalEnv);
     if (pair != nil) return cdr(pair);
@@ -3821,8 +3825,8 @@ VPtr<object, SPIRAMVAlloc> eval (VPtr<object, SPIRAMVAlloc> form, VPtr<object, S
   }
   
   // It's a list
-  VPtr<object, SPIRAMVAlloc> function = car(form);
-  VPtr<object, SPIRAMVAlloc> args = cdr(form);
+  objectvptr function = car(form);
+  objectvptr args = cdr(form);
 
   if (function == nil) error(0, PSTR("illegal function"), nil);
   if (!listp(args)) error(0, PSTR("can't evaluate a dotted pair"), args);
@@ -3833,13 +3837,13 @@ VPtr<object, SPIRAMVAlloc> eval (VPtr<object, SPIRAMVAlloc> form, VPtr<object, S
 
     if ((name == LET) || (name == LETSTAR)) {
       int TCstart = TC;
-      VPtr<object, SPIRAMVAlloc> assigns = first(args);
+      objectvptr assigns = first(args);
       if (!listp(assigns)) error(name, PSTR("first argument is not a list"), assigns);
-      VPtr<object, SPIRAMVAlloc> forms = cdr(args);
-      VPtr<object, SPIRAMVAlloc> newenv = env;
+      objectvptr forms = cdr(args);
+      objectvptr newenv = env;
       push(newenv, GCStack);
       while (assigns != nil) {
-        VPtr<object, SPIRAMVAlloc> assign = car(assigns);
+        objectvptr assign = car(assigns);
         if (!consp(assign)) push(cons(assign,nil), newenv);
         else if (cdr(assign) == nil) push(cons(first(assign),nil), newenv);
         else push(cons(first(assign),eval(second(assign),env)), newenv);
@@ -3856,9 +3860,9 @@ VPtr<object, SPIRAMVAlloc> eval (VPtr<object, SPIRAMVAlloc> form, VPtr<object, S
 
     if (name == LAMBDA) {
       if (env == nil) return form;
-      VPtr<object, SPIRAMVAlloc> envcopy = nil;
+      objectvptr envcopy = nil;
       while (env != nil) {
-        VPtr<object, SPIRAMVAlloc> pair = first(env);
+        objectvptr pair = first(env);
         if (pair != nil) push(pair, envcopy);
         env = cdr(env);
       }
@@ -3879,16 +3883,16 @@ VPtr<object, SPIRAMVAlloc> eval (VPtr<object, SPIRAMVAlloc> form, VPtr<object, S
   }
         
   // Evaluate the parameters - result in head
-  VPtr<object, SPIRAMVAlloc> fname = car(form);
+  objectvptr fname = car(form);
   int TCstart = TC;
-  VPtr<object, SPIRAMVAlloc> head = cons(eval(car(form), env), nil);
+  objectvptr head = cons(eval(car(form), env), nil);
   push(head, GCStack); // Don't GC the result list
-  VPtr<object, SPIRAMVAlloc> tail = head;
+  objectvptr tail = head;
   form = cdr(form);
   int nargs = 0;
 
   while (form != nil){
-    VPtr<object, SPIRAMVAlloc> obj = cons(eval(car(form),env),nil);
+    objectvptr obj = cons(eval(car(form),env),nil);
     cdr(tail) = obj;
     tail = obj;
     form = cdr(form);
@@ -3903,7 +3907,7 @@ VPtr<object, SPIRAMVAlloc> eval (VPtr<object, SPIRAMVAlloc> form, VPtr<object, S
     if (name >= ENDFUNCTIONS) error(0, PSTR("not valid here"), fname);
     if (nargs<lookupmin(name)) error2(name, PSTR("has too few arguments"));
     if (nargs>lookupmax(name)) error2(name, PSTR("has too many arguments"));
-    VPtr<object, SPIRAMVAlloc> result = ((fn_ptr_type)lookupfn(name))(args, env);
+    objectvptr result = ((fn_ptr_type)lookupfn(name))(args, env);
     pop(GCStack);
     return result;
   }
@@ -3913,7 +3917,7 @@ VPtr<object, SPIRAMVAlloc> eval (VPtr<object, SPIRAMVAlloc> form, VPtr<object, S
     pop(GCStack);
     int trace = tracing(fname->val.name);
     if (trace) {
-      VPtr<object, SPIRAMVAlloc> result = eval(form, env);
+      objectvptr result = eval(form, env);
       indent((--(TraceDepth[trace-1]))<<1, pserial);
       pint(TraceDepth[trace-1], pserial);
       pserial(':'); pserial(' ');
@@ -3969,7 +3973,7 @@ void pstring (char *s, pfun_t pfun) {
   while (*s) pfun(*s++);
 }
 
-void printstring (VPtr<object, SPIRAMVAlloc> form, pfun_t pfun) {
+void printstring (objectvptr form, pfun_t pfun) {
   if (tstflag(PRINTREADABLY)) pfun('"');
   form = cdr(form);
   while (form != nil) {
@@ -4064,7 +4068,7 @@ void pfl (pfun_t pfun) {
   if (LastPrint != '\n') pfun('\n');
 }
 
-void printobject (VPtr<object, SPIRAMVAlloc> form, pfun_t pfun){
+void printobject (objectvptr form, pfun_t pfun){
   if (form == nil) pfstring(PSTR("nil"), pfun);
   else if (listp(form) && issymbol(car(form), CLOSURE)) pfstring(PSTR("<closure>"), pfun);
   else if (listp(form)) {
@@ -4111,9 +4115,9 @@ int glibrary () {
   return (c != 0) ? c : -1; // -1?
 }
 
-void loadfromlibrary (VPtr<object, SPIRAMVAlloc> env) {   
+void loadfromlibrary (objectvptr env) {   
   GlobalStringIndex = 0;
-  VPtr<object, SPIRAMVAlloc> line = read(glibrary);
+  objectvptr line = read(glibrary);
   while (line != nil) {
     eval(line, env);
     line = read(glibrary);
@@ -4132,7 +4136,7 @@ int gserial () {
   return temp;
 }
 
-VPtr<object, SPIRAMVAlloc> nextitem (gfun_t gfun) {
+objectvptr nextitem (gfun_t gfun) {
   int ch = gfun();
   while(isspace(ch)) ch = gfun();
 
@@ -4179,7 +4183,7 @@ VPtr<object, SPIRAMVAlloc> nextitem (gfun_t gfun) {
     else if (ch == '\'') return nextitem(gfun);
     else if (ch == '.') {
       setflag(NOESC);
-      VPtr<object, SPIRAMVAlloc> result = eval(read(gfun), nil);
+      objectvptr result = eval(read(gfun), nil);
       clrflag(NOESC);
       return result;
     } else error2(0, PSTR("illegal character after #"));
@@ -4243,10 +4247,10 @@ VPtr<object, SPIRAMVAlloc> nextitem (gfun_t gfun) {
   else return newsymbol(longsymbol(buffer));
 }
 
-VPtr<object, SPIRAMVAlloc> readrest (gfun_t gfun) {
-  VPtr<object, SPIRAMVAlloc> item = nextitem(gfun);
-  VPtr<object, SPIRAMVAlloc> head = nil;
-  VPtr<object, SPIRAMVAlloc> tail = nil;
+objectvptr readrest (gfun_t gfun) {
+  objectvptr item = nextitem(gfun);
+  objectvptr head = nil;
+  objectvptr tail = nil;
 
   while (item.getRawNum() != KET) {
     if (item.getRawNum() == BRA) {
@@ -4258,7 +4262,7 @@ VPtr<object, SPIRAMVAlloc> readrest (gfun_t gfun) {
       if (readrest(gfun) != nil) error2(0, PSTR("malformed list"));
       return head;
     } else {
-      VPtr<object, SPIRAMVAlloc> cell = cons(item, nil);
+      objectvptr cell = cons(item, nil);
       if (head == nil) head = cell;
       else tail->ptr.cdr = cell;
       tail = cell;
@@ -4268,8 +4272,8 @@ VPtr<object, SPIRAMVAlloc> readrest (gfun_t gfun) {
   return head;
 }
 
-VPtr<object, SPIRAMVAlloc> read (gfun_t gfun) {
-  VPtr<object, SPIRAMVAlloc> item = nextitem(gfun);
+objectvptr read (gfun_t gfun) {
+  objectvptr item = nextitem(gfun);
   if (item.getRawNum() == KET) error2(0, PSTR("incomplete list"));
   if (item.getRawNum() == BRA) return readrest(gfun);
   if (item.getRawNum() == DOT) return read(gfun);
@@ -4286,6 +4290,7 @@ void initenv () {
 
 void setup () {
   Serial.begin(9600);
+  SPIFFS.begin();
   int start = millis();
   while ((millis() - start) < 5000) { if (Serial) break; }
   valloc.start();
@@ -4302,26 +4307,29 @@ void setup () {
 
 // Read/Evaluate/Print loop
 
-void repl (VPtr<object, SPIRAMVAlloc> env) {
+void repl (objectvptr env) {
+  uint32_t t = micros();
   for (;;) {
     randomSeed(micros());
     gc(nil, env);
     #if defined (printfreespace)
-    pint(Freespace, pserial);
+    //pint(Freespace, pserial);
+    Serial.println(micros() - t);
+    t = micros();
     #endif
     if (BreakLevel) {
       pfstring(PSTR(" : "), pserial);
       pint(BreakLevel, pserial);
     }
     pfstring(PSTR("> "), pserial);
-    VPtr<object, SPIRAMVAlloc> line = read(gserial);
+    objectvptr line = read(gserial);
     if (BreakLevel && line == nil) { pln(pserial); return; }
     if (line.getRawNum() == KET) error2(0, PSTR("unmatched right bracket"));
     push(line, GCStack);
     pfl(pserial);
     line = eval(line, env);
     pfl(pserial);
-    printobject(line, pserial);
+    printobject(line, pserial);;
     pop(GCStack);
     pfl(pserial);
     pln(pserial);
@@ -4346,9 +4354,11 @@ void loop () {
   #endif
   SPIFFSpfile.close(); SPIFFSgfile.close();
   #if defined(lisplibrary)
-  if (!tstflag(LIBRARYLOADED)) { setflag(LIBRARYLOADED); loadfromlibrary(nil); }
+  //if (!tstflag(LIBRARYLOADED)) { setflag(LIBRARYLOADED); loadfromlibrary(nil); }
   #endif
   client.stop();
   repl(nil);
   valloc.stop();
+  SPIFFS.end();
+Serial.print("end loop");
 }
