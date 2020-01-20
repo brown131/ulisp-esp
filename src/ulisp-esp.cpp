@@ -1,5 +1,7 @@
-/* uLisp ESP Version 3.0b - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 11th January 2020
+/* uLisp ESP Version 3.0a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 6th December 2019
+
+  Built-in SPIFFS suppoer
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -14,6 +16,7 @@
 #define serialmonitor
 // #define printgcs
 // #define sdcardsupport
+// #define eepromsupport
 #define lisplibrary
 
 // Includes
@@ -25,8 +28,10 @@
 #include <EEPROM.h>
 #if defined (ESP8266)
   #include <ESP8266WiFi.h>
+  #include <FS.h>
 #elif defined (ESP32)
   #include <WiFi.h>
+  #include <SPIFFS.h>
 #endif
 #include "LispLibrary.h"
 
@@ -72,11 +77,11 @@
 const int TRACEMAX = 3; // Number of traced functions
 enum type { ZERO=0, SYMBOL=2, NUMBER=4, STREAM=6, CHARACTER=8, FLOAT=10, STRING=12, PAIR=14 };  // STRING and PAIR must be last
 enum token { UNUSED, BRA, KET, QUO, DOT };
-enum stream { SERIALSTREAM, I2CSTREAM, SPISTREAM, SDSTREAM, WIFISTREAM };
+enum stream { SERIALSTREAM, I2CSTREAM, SPISTREAM, SDSTREAM, SPIFFSSTREAM, WIFISTREAM };
 
 enum function { NIL, TEE, NOTHING, OPTIONAL, AMPREST, LAMBDA, LET, LETSTAR, CLOSURE, SPECIAL_FORMS, QUOTE,
 DEFUN, DEFVAR, SETQ, LOOP, RETURN, PUSH, POP, INCF, DECF, SETF, DOLIST, DOTIMES, TRACE, UNTRACE,
-FORMILLIS, WITHSERIAL, WITHI2C, WITHSPI, WITHSDCARD, WITHCLIENT, TAIL_FORMS, PROGN, IF, COND, WHEN,
+FORMILLIS, WITHSERIAL, WITHI2C, WITHSPI, WITHSDCARD, WITHSPIFFS,  WITHCLIENT, TAIL_FORMS, PROGN, IF, COND, WHEN,
 UNLESS, CASE, AND, OR, FUNCTIONS, NOT, NULLFN, CONS, ATOM, LISTP, CONSP, SYMBOLP, STREAMP, EQ, CAR, FIRST,
 CDR, REST, CAAR, CADR, SECOND, CDAR, CDDR, CAAAR, CAADR, CADAR, CADDR, THIRD, CDAAR, CDADR, CDDAR, CDDDR,
 LENGTH, LIST, REVERSE, NTH, ASSOC, MEMBER, APPLY, FUNCALL, APPEND, MAPC, MAPCAR, MAPCAN, ADD, SUBTRACT,
@@ -417,10 +422,15 @@ void SDWriteInt (File file, int data) {
   file.write(data & 0xFF); file.write(data>>8 & 0xFF);
   file.write(data>>16 & 0xFF); file.write(data>>24 & 0xFF);
 }
-#else
+#elif defined(eepromsupport)
 void EpromWriteInt(int *addr, uintptr_t data) {
   EEPROM.write((*addr)++, data & 0xFF); EEPROM.write((*addr)++, data>>8 & 0xFF);
   EEPROM.write((*addr)++, data>>16 & 0xFF); EEPROM.write((*addr)++, data>>24 & 0xFF);
+}
+#else
+void SpiffsWriteInt (File file, int data) {
+  file.write(data & 0xFF); file.write(data>>8 & 0xFF);
+  file.write(data>>16 & 0xFF); file.write(data>>24 & 0xFF);
 }
 #endif
 
@@ -450,7 +460,7 @@ unsigned int saveimage (object *arg) {
   }
   file.close();
   return imagesize;
-#else
+#elif defined(eepromsupport)
   if (!(arg == NULL || listp(arg))) error(SAVEIMAGE, PSTR("illegal argument"), arg);
   int bytesneeded = imagesize*8 + SYMBOLTABLESIZE + 36;
   if (bytesneeded > EEPROMSIZE) error(SAVEIMAGE, PSTR("image size too large"), number(imagesize));
@@ -471,6 +481,36 @@ unsigned int saveimage (object *arg) {
   }
   EEPROM.commit();
   return imagesize;
+#else
+  SPIFFS.begin();
+  File file;
+  if (stringp(arg)) {
+    file = SPIFFS.open(MakeFilename(arg), "w");
+    arg = NULL;
+  } else if (arg == NULL || listp(arg)) file = SPIFFS.open("/ULISP.IMG", "w");
+  else error(SAVEIMAGE, PSTR("illegal argument"), arg);
+//  if (!file) {
+//    // Retry after formatting.
+//    SPIFFS.format();
+//    file = SPIFFS.open(MakeFilename(arg), "w");
+//    arg = NULL;
+//  }
+  if (!file) error2(SAVEIMAGE, PSTR("problem saving to SPIFFS"));
+  SpiffsWriteInt(file, (uintptr_t)arg);
+  SpiffsWriteInt(file, imagesize);
+  SpiffsWriteInt(file, (uintptr_t)GlobalEnv);
+  SpiffsWriteInt(file, (uintptr_t)GCStack);
+  #if SYMBOLTABLESIZE > BUFFERSIZE
+  SpiffsWriteInt(file, (uintptr_t)SymbolTop);
+  for (int i=0; i<SYMBOLTABLESIZE; i++) file.write(SymbolTable[i]);
+  #endif
+  for (unsigned int i=0; i<imagesize; i++) {
+    object *obj = &Workspace[i];
+    SpiffsWriteInt(file, (uintptr_t)car(obj));
+    SpiffsWriteInt(file, (uintptr_t)cdr(obj));
+  }
+  file.close();
+  return imagesize;
 #endif
 }
 
@@ -480,10 +520,16 @@ int SDReadInt (File file) {
   uintptr_t b2 = file.read(); uintptr_t b3 = file.read();
   return b0 | b1<<8 | b2<<16 | b3<<24;
 }
-#else
+#elif defined(eepromsupport)
 int EpromReadInt (int *addr) {
   uint8_t b0 = EEPROM.read((*addr)++); uint8_t b1 = EEPROM.read((*addr)++);
   uint8_t b2 = EEPROM.read((*addr)++); uint8_t b3 = EEPROM.read((*addr)++);
+  return b0 | b1<<8 | b2<<16 | b3<<24;
+}
+#else
+int SpiffsReadInt (File file) {
+  uintptr_t b0 = file.read(); uintptr_t b1 = file.read();
+  uintptr_t b2 = file.read(); uintptr_t b3 = file.read();
   return b0 | b1<<8 | b2<<16 | b3<<24;
 }
 #endif
@@ -512,7 +558,7 @@ unsigned int loadimage (object *arg) {
   file.close();
   gc(NULL, NULL);
   return imagesize;
-#else
+#elif defined(eepromsupport)
   EEPROM.begin(EEPROMSIZE);
   int addr = 0;
   EpromReadInt(&addr); // Skip eval address
@@ -531,6 +577,29 @@ unsigned int loadimage (object *arg) {
   }
   gc(NULL, NULL);
   return imagesize;
+#else
+  SPIFFS.begin();
+  File file;
+  if (stringp(arg)) file = SPIFFS.open(MakeFilename(arg), "r");
+  else if (arg == NULL) file = SPIFFS.open("/ULISP.IMG", "r");
+  else error(LOADIMAGE, PSTR("illegal argument"), arg);
+  if (!file) error2(LOADIMAGE, PSTR("problem loading from SPIFFS"));
+  SpiffsReadInt(file);
+  int imagesize = SpiffsReadInt(file);
+  GlobalEnv = (object *)SpiffsReadInt(file);
+  GCStack = (object *)SpiffsReadInt(file);
+  #if SYMBOLTABLESIZE > BUFFERSIZE
+  SymbolTop = (char *)SpiffsReadInt(file);
+  for (int i=0; i<SYMBOLTABLESIZE; i++) SymbolTable[i] = file.read();
+  #endif
+  for (int i=0; i<imagesize; i++) {
+    object *obj = &Workspace[i];
+    car(obj) = (object *)SpiffsReadInt(file);
+    cdr(obj) = (object *)SpiffsReadInt(file);
+  }
+  file.close();
+  gc(NULL, NULL);
+  return imagesize;
 #endif
 }
 
@@ -545,11 +614,21 @@ void autorunimage () {
     loadimage(NULL);
     apply(0, autorun, NULL, NULL);
   }
-#else
+#elif defined(eepromsupport)
   EEPROM.begin(EEPROMSIZE);
   int addr = 0;
   object *autorun = (object *)EpromReadInt(&addr);
   if (autorun != NULL && (unsigned int)autorun != 0xFFFF) {
+    loadimage(NULL);
+    apply(0, autorun, NULL, NULL);
+  }
+#else
+  SPIFFS.begin();
+  File file = SPIFFS.open("/ULISP.IMG", "r");
+  if (!file) error2(0, PSTR("problem autorunning from SPIFFS"));
+  object *autorun = (object *)SpiffsReadInt(file);
+  file.close();
+  if (autorun != NULL) {
     loadimage(NULL);
     apply(0, autorun, NULL, NULL);
   }
@@ -1071,6 +1150,15 @@ void I2Cstop (uint8_t read) {
 
 inline int spiread () { return SPI.transfer(0); }
 inline int serial1read () { while (!Serial1.available()) testescape(); return Serial1.read(); }
+File SPIFFSpfile, SPIFFSgfile;
+inline int SPIFFSread () {
+  if (LastChar) { 
+    char temp = LastChar;
+    LastChar = 0;
+    return temp;
+  }
+  return SPIFFSgfile.read();
+}
 #if defined(sdcardsupport)
 File SDpfile, SDgfile;
 inline int SDread () {
@@ -1096,12 +1184,16 @@ inline int WiFiread () {
 }
 
 void serialbegin (int address, int baud) {
+  #if defined(ESP32) || defined(ESP8266)
   if (address == 1) Serial1.begin((long)baud*100);
   else error(WITHSERIAL, PSTR("port not supported"), number(address));
+  #endif
 }
 
 void serialend (int address) {
+  #if defined(ESP32) || defined(ESP8266)
   if (address == 1) {Serial1.flush(); Serial1.end(); }
+  #endif
 }
 
 gfun_t gstreamfun (object *args) {
@@ -1121,13 +1213,14 @@ gfun_t gstreamfun (object *args) {
   #if defined(sdcardsupport)
   else if (streamtype == SDSTREAM) gfun = (gfun_t)SDread;
   #endif
+  else if (streamtype == SPIFFSSTREAM) gfun = (gfun_t)SPIFFSread;
   else if (streamtype == WIFISTREAM) gfun = (gfun_t)WiFiread;
   else error2(0, PSTR("unknown stream type"));
   return gfun;
 }
 
 inline void spiwrite (char c) { SPI.transfer(c); }
-inline void serial1write (char c) { Serial1.write(c); }
+inline void SPIFFSwrite (char c) { SPIFFSpfile.write(c); }
 inline void WiFiwrite (char c) { client.write(c); }
 #if defined(sdcardsupport)
 inline void SDwrite (char c) { SDpfile.write(c); }
@@ -1145,11 +1238,11 @@ pfun_t pstreamfun (object *args) {
   else if (streamtype == SPISTREAM) pfun = spiwrite;
   else if (streamtype == SERIALSTREAM) {
     if (address == 0) pfun = pserial;
-    else if (address == 1) pfun = serial1write;
   }   
   #if defined(sdcardsupport)
   else if (streamtype == SDSTREAM) pfun = (pfun_t)SDwrite;
   #endif
+  else if (streamtype == SPIFFSSTREAM) pfun = (pfun_t)SPIFFSwrite;
   else if (streamtype == WIFISTREAM) pfun = (pfun_t)WiFiwrite;
   else error2(0, PSTR("unknown stream type"));
   return pfun;
@@ -1577,6 +1670,31 @@ object *sp_withsdcard (object *args, object *env) {
   error2(WITHSDCARD, PSTR("not supported"));
   return nil;
 #endif
+}
+
+object *sp_withspiffs (object *args, object *env) {
+  object *params = first(args);
+  object *var = first(params);
+  object *filename = eval(second(params), env);
+  params = cddr(params);
+  SPIFFS.begin();
+  int mode = 0;
+  if (params != NULL && first(params) != NULL) mode = checkinteger(WITHSPIFFS, first(params));
+  const char *oflag = "r";
+  if (mode == 1) oflag = "a"; else if (mode == 2) oflag = "w";
+  if (mode >= 1) {
+    SPIFFSpfile = SPIFFS.open(MakeFilename(filename), oflag);
+    if (!SPIFFSpfile) error2(WITHSPIFFS, PSTR("problem writing to SPIFFS"));
+  } else {
+    SPIFFSgfile = SPIFFS.open(MakeFilename(filename), oflag);
+    if (!SPIFFSgfile) error2(WITHSPIFFS, PSTR("problem reading from SPIFFS"));
+  }
+  object *pair = cons(var, stream(SPIFFSSTREAM, 1));
+  push(pair,env);
+  object *forms = cdr(args);
+  object *result = eval(tf_progn(forms,env), env);
+  if (mode >= 1) SPIFFSpfile.close(); else SPIFFSgfile.close();
+  return result;
 }
 
 object *sp_withclient (object *args, object *env) {
@@ -2577,7 +2695,6 @@ object *fn_sort (object *args, object *env) {
   push(list,GCStack);
   object *predicate = second(args);
   object *compare = cons(NULL, cons(NULL, NULL));
-  push(compare,GCStack);
   object *ptr = cdr(list);
   while (cdr(ptr) != NULL) {
     object *go = list;
@@ -2594,7 +2711,7 @@ object *fn_sort (object *args, object *env) {
       cdr(go) = obj;
     } else ptr = cdr(ptr);
   }
-  pop(GCStack); pop(GCStack);
+  pop(GCStack);
   return cdr(list);
 }
 
@@ -3105,9 +3222,9 @@ void superprint (object *form, int lm, pfun_t pfun) {
   else supersub(form, lm + PPINDENT, 1, pfun);
 }
 
-const int ppspecials = 16;
+const int ppspecials = 17;
 const char ppspecial[ppspecials] PROGMEM = 
-  { DOTIMES, DOLIST, IF, SETQ, TEE, LET, LETSTAR, LAMBDA, WHEN, UNLESS, WITHI2C, WITHSERIAL, WITHSPI, WITHSDCARD, FORMILLIS, WITHCLIENT };
+  { DOTIMES, DOLIST, IF, SETQ, TEE, LET, LETSTAR, LAMBDA, WHEN, UNLESS, WITHI2C, WITHSERIAL, WITHSPI, WITHSDCARD, WITHSPIFFS, FORMILLIS, WITHCLIENT };
 
 void supersub (object *form, int lm, int super, pfun_t pfun) {
   int special = 0, separate = 1;
@@ -3294,6 +3411,7 @@ const char string26[] PROGMEM = "with-serial";
 const char string27[] PROGMEM = "with-i2c";
 const char string28[] PROGMEM = "with-spi";
 const char string29[] PROGMEM = "with-sd-card";
+const char string2A[] PROGMEM = "with-spiffs";
 const char string30[] PROGMEM = "with-client";
 const char string31[] PROGMEM = "tail_forms";
 const char string32[] PROGMEM = "progn";
@@ -3481,6 +3599,7 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string27, sp_withi2c, 1, 127 },
   { string28, sp_withspi, 1, 127 },
   { string29, sp_withsdcard, 2, 127 },
+  { string2A, sp_withspiffs, 2, 127 },
   { string30, sp_withclient, 1, 2 },
   { string31, NULL, NIL, NIL },
   { string32, tf_progn, 0, 127 },
@@ -3748,7 +3867,6 @@ object *eval (object *form, object *env) {
     if ((name == LET) || (name == LETSTAR)) {
       int TCstart = TC;
       object *assigns = first(args);
-      if (!listp(assigns)) error(name, PSTR("first argument is not a list"), assigns);
       object *forms = cdr(args);
       object *newenv = env;
       push(newenv, GCStack);
