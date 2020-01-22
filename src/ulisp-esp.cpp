@@ -118,21 +118,23 @@ typedef struct sobject {
 	      symbol_t name;
         int integer;
         float single_float;
-        char cstr[];
+        char cstr[];  // extends size of object
       };
     };
   };
 } object;
 
 typedef struct {
-  object *base;
-  uint16_t free_space;
-  byte flags;
+  byte *base;           // physical address of page in the heap
+  uint16_t start;       // offset in bytes of first free space in the page
+  uint16_t free_space;  // total bytes of free space available
+  byte flags;           // dirty and resident flags
+  byte next;            // next page to allocate to after this is full.
 } page_info;
 
 typedef struct sfree_space {
-  sfree_space *next;
-  size_t size;
+  uint16_t next;   // offset in bytes the next free space relative to the start of the page. 
+  uint16_t size;   // size of bytes of the free space
 } free_space;
 
 typedef object *(*fn_ptr_type)(object *, object *);
@@ -177,10 +179,12 @@ typedef int PinMode;
 #define NUM_PAGES 32
 #define RESIDENT_PAGES 32
 #define BASE_OFFSET 64000
+#define NULL_VPTR INT_MAX
 
 page_info Pages[NUM_PAGES];
+uint Nursery = 0;
 byte Heap[RESIDENT_PAGES * PAGE_SIZE];
-free_space* FreeSpace;
+obj_vptr FreeSpace;
 obj_vptr SymbolList;
 
 object Workspace[WORKSPACESIZE] WORDALIGNED;
@@ -252,12 +256,17 @@ int glibrary ();
 
 // Set up workspace
 
-void initfreespace() {
+void initheap() {
+  FreeSpace = 0;
   for (int i=NUM_PAGES-1; i>=0; i--) {
-    free_space *spc = (free_space*) &Heap[i * PAGE_SIZE];
-    spc->next = FreeSpace;
+    Pages[i].base = &Heap[i * PAGE_SIZE];
+    Pages[i].start = 0;
+    Pages[i].free_space = PAGE_SIZE;
+    Pages[i].flags = 0;
+    Pages[i].next = (i + 1) % NUM_PAGES;
+    free_space *spc = (free_space *)Pages[i].base;
+    spc->next = PAGE_SIZE;
     spc->size = PAGE_SIZE;
-    FreeSpace = spc;
   }
 }
 
@@ -277,27 +286,40 @@ obj_vptr getvptr(object *obj) {
 }
 
 obj_vptr valloc(size_t size=sizeof(object)) {
-  free_space *spc = FreeSpace;
+  // Find free space
+  page_info page = Pages[Nursery];
   free_space *prev = nullptr;
+  free_space *spc = (free_space *)((uint)page.base + page.start);
   size += size % 2;
   while (spc->size < size) {
-    prev = spc;
-    spc = spc->next;
-    if (spc == nullptr) error2(0, PSTR("no room"));
+    if (spc->next == PAGE_SIZE) {
+      if (page.next != 0) {
+        Nursery = page.next;
+        page = Pages[Nursery];
+        prev = nullptr;
+      } else {
+        error2(0, PSTR("no room"));
+      }
+    } else {
+      prev = spc;
+      spc = (free_space *)((uint)page.base + spc->next);
+    }
   }
+
   object *obj = (object *)spc;
-  Pages[(uint)spc / PAGE_SIZE].flags |= 1<<DIRTY;
-  if ((spc->size - size - sizeof(free_space)) <= 0) {
+  
+  // Adjust the free space.
+  page.flags |= 1<<DIRTY;
+  if (spc->size == size) {
     if (prev != nullptr) prev->next = spc->next;
-    else FreeSpace = spc->next;
+    else Nursery = page.next;
   } else {
-    size_t newsize = spc->size - size;
-    free_space *next = spc->next;
+    uint16_t next = spc->next;
     spc += size;
-    spc->size = newsize;
+    spc->size -= size;
     spc->next = next;
-    if (prev != nullptr) prev->next = spc;
-    else FreeSpace = spc;
+    if (prev != nullptr) prev->next += size;
+    else page.start += size;
   }
   return getvptr(obj);
 }
@@ -305,42 +327,55 @@ obj_vptr valloc(size_t size=sizeof(object)) {
 // Realloc space in a clean heap when collecting;
 void vrealloc(obj_vptr vptr, size_t size=sizeof(object)) {
   object *obj = getobject(vptr);
-  free_space *spc = FreeSpace;
+
+  page_info page = Pages[Nursery];
   free_space *prev = nullptr;
+  free_space *spc = (free_space *)((uint)page.base + page.start);
   size += size % 2;
   while ((uint)spc > (uint)obj) {
-    prev = spc;
-    spc = spc->next;
-    if (spc == nullptr) error2(0, PSTR("no room"));
+    if (spc->next == PAGE_SIZE) {
+      if (page.next != 0) {
+        Nursery = page.next;
+        page = Pages[Nursery];
+        prev = nullptr;
+      } else {
+        error2(0, PSTR("no room"));
+      }
+    } else {
+      prev = spc;
+      spc = (free_space *)((uint)page.base + spc->next);
+    }
   }
-  Pages[(uint)spc / PAGE_SIZE].flags |= 1<<DIRTY;
+
+  page.flags |= 1<<DIRTY;
   if ((uint)spc == (uint)obj) {
-    free_space *prev = spc;
-    spc += size;
-    if (prev == FreeSpace) FreeSpace = spc;
+    if (prev != nullptr) prev->next = spc->next;
+    else Nursery = page.next;
   }
-  else if ((uint)(spc + spc->size) == (uint)(obj + size)) spc->size -= size;
+  else if ((uint)(spc + spc->size) == (uint)(obj + size)) 
+    spc->size -= size;
   else {
-    free_space *next = spc->next;
     size_t size1 = (uint)obj - (uint)spc;
     size_t size2 = spc->size - size1 - size;
-    spc->next = spc + size1 + size;
+    free_space *next = (free_space *)((uint)page.base + spc->next);
+    next->next = spc->next;
+    next->size = size2;
+    spc->next -= size;
     spc->size = size1;
-    spc->next->next = next;
-    spc->next->size = size2;
   }
 }
 
 void vfree(obj_vptr vptr) {
   object *obj = getobject(vptr);
-  free_space *spc = FreeSpace;
-  free_space *prev = nullptr;
+
+  page_info page = Pages[vptr / PAGE_SIZE];
+  uint offset = vptr % PAGE_SIZE;
+  free_space *spc = (free_space *)((uint)page.base + page.start);
   while ((uint)spc > (uint)obj) {
-    prev = spc;
-    spc = spc->next;
+    spc = (free_space *)((uint)page.base + spc->next);
     if (spc == nullptr) return;
   }
-  Pages[(uint)spc / PAGE_SIZE].flags |= 1<<DIRTY;
+  page.flags |= 1<<DIRTY;
 
   size_t size = sizeof(object);
   if (obj->type == CSTRING) {
@@ -348,10 +383,16 @@ void vfree(obj_vptr vptr) {
     size = sizeof(type) + len + 1 + ((len + 1) % 2);
   }
 
-  if ((((uint)spc + spc->size) == (uint)obj && ((uint)spc->next % PAGE_SIZE) != 0) && 
-      ((uint)spc->next == ((uint)obj + size))) {
-    spc->next = spc->next->next;
-    spc->size += size + spc->next->size;
+  if (offset == 0) {
+    page.start = size;
+    free_space *newspc = page.start
+  } else if (offset + size == PAGE_SIZE) {
+
+  } else if ((((uint)spc + spc->size) == (uint)obj && spc->next != PAGE_SIZE) (!= 0) && 
+      (spc->next == ((uint)obj + size))) {
+    free_space *next = (free_space *)((uint)page.base + spc->next);    
+    spc->next = next->next;
+    spc->size += size + next->size;
   } else if (((uint)spc + spc->size) == (uint)obj && (((uint)spc + spc->size) % PAGE_SIZE) != 0) spc->size += size;  
   else if ((uint)spc->next == ((uint)obj + size) && (((uint)spc->next % PAGE_SIZE) != 0)) {
     free_space *newspc = spc->next - size;
@@ -484,7 +525,7 @@ void gc (object *form, object *env) {
     free(FreeSpace);
     FreeSpace = next;
   }
-  initfreespace();
+  initheap();
   // vrealloc(tee);
   // vrealloc(GlobalEnv);
   // vrealloc(GCStack);
