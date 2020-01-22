@@ -1,7 +1,7 @@
 /* uLisp ESP Version 3.0a - www.ulisp.com
    David Johnson-Davies - www.technoblogy.com - 6th December 2019
 
-  Built-in SPIFFS suppoer
+  Built-in SPIFFS support
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -45,6 +45,7 @@
 // C Macros
 
 #define nil                NULL
+#define nullvptr           INT_MAX
 #define car(x)             (((object *) (x))->car)
 #define cdr(x)             (((object *) (x))->cdr)
 
@@ -68,8 +69,8 @@
 #define marked(x)          ((((uintptr_t)(car(x))) & MARKBIT) != 0)
 #define MARKBIT            1
 
-#define setflag(x)         (Flags = Flags | 1<<(x))
-#define clrflag(x)         (Flags = Flags & ~(1<<(x)))
+#define setflag(x)         (Flags |= 1<<(x))
+#define clrflag(x)         (Flags &= ~(1<<(x)))
 #define tstflag(x)         (Flags & 1<<(x))
 
 // Constants
@@ -100,8 +101,6 @@ AVAILABLE, WIFISERVER, WIFISOFTAP, CONNECTED, WIFILOCALIP, WIFICONNECT, ENDFUNCT
 
 typedef unsigned int obj_vptr;
 
-typedef unsigned int symbol_t;
-
 typedef struct sobject {
   union {
     struct {
@@ -115,10 +114,9 @@ typedef struct sobject {
     struct {
       unsigned int type;
       union {
-	      symbol_t name;
+        char name[];
         int integer;
         float single_float;
-        char cstr[];
       };
     };
   };
@@ -131,8 +129,10 @@ typedef struct {
 } page_info;
 
 typedef struct sfree_space {
+  obj_vptr start;
+  obj_vptr end;  // exclusive
   sfree_space *next;
-  size_t size;
+  sfree_space *prev;
 } free_space;
 
 typedef object *(*fn_ptr_type)(object *, object *);
@@ -163,7 +163,7 @@ typedef int PinMode;
   typedef int BitOrder;
 
 #elif defined(ESP32)
-  #define WORKSPACESIZE 8000-SDSIZE       /* Cells (8*bytes) */
+  #define WORKSPACESIZE 2048-SDSIZE       /* Cells (8*bytes) */
   #define EEPROMSIZE 4096                 /* Bytes available for EEPROM */
   #define SYMBOLTABLESIZE 1024            /* Bytes */
   #define analogWrite(x,y) dacWrite((x),(y))
@@ -176,7 +176,6 @@ typedef int PinMode;
 #define PAGE_SIZE 512
 #define NUM_PAGES 32
 #define RESIDENT_PAGES 32
-#define BASE_OFFSET 64000
 
 page_info Pages[NUM_PAGES];
 byte Heap[RESIDENT_PAGES * PAGE_SIZE];
@@ -192,8 +191,9 @@ jmp_buf exception;
 unsigned int Freespace = 0;
 object *Freelist;
 char *SymbolTop = SymbolTable;
+
 unsigned int I2CCount;
-unsigned int TraceFn[TRACEMAX];
+function TraceFn[TRACEMAX];
 unsigned int TraceDepth[TRACEMAX];
 
 object *GlobalEnv;
@@ -211,38 +211,38 @@ volatile char Flags = 0b00001; // PRINTREADABLY set by default
 // Forward references
 object *getobject(obj_vptr vptr);
 
-object *tee;
+obj_vptr tee;
 object *tf_progn (object *form, object *env);
 object *eval (object *form, object *env);
 object *read ();
 void repl(object *env);
 void printobject (object *form, pfun_t pfun);
-char *lookupbuiltin (symbol_t name);
-intptr_t lookupfn (symbol_t name);
-int builtin (char* n);
-void error (symbol_t fname, PGM_P string, object *symbol);
-void error2 (symbol_t fname, PGM_P string);
+char *lookupbuiltin (obj_vptr name);
+intptr_t lookupfn (obj_vptr name);
+function builtin (char* n);
+void error (obj_vptr fname, PGM_P string, object *symbol);
+void error2 (obj_vptr fname, PGM_P string);
 
 inline int maxbuffer (char *buffer);
 char nthchar (object *string, int n);
 boolean listp (object *x);
-object *apply (symbol_t name, object *function, object *args, object *env);
+object *apply (obj_vptr name, object *function, object *args, object *env);
 void pserial (char c);
 void pfl (pfun_t pfun);
 void pfstring (const char *s, pfun_t pfun);
-char *symbolname (symbol_t x);
+char *symbolname (obj_vptr x);
 void pln (pfun_t pfun);
 void pstring (char *s, pfun_t pfun);
-char *lookupsymbol (symbol_t name) ;
-int listlength (symbol_t name, object *list);
-uint8_t lookupmin (symbol_t name);
-uint8_t lookupmax (symbol_t name);
+char *lookupsymbol (obj_vptr name) ;
+int listlength (obj_vptr name, object *list);
+uint8_t lookupmin (obj_vptr name);
+uint8_t lookupmax (obj_vptr name);
 char *cstring (object *form, char *buffer, int buflen);
 void pint (int i, pfun_t pfun);
 void testescape ();
 int gserial ();
 object *read (gfun_t gfun);
-void deletesymbol (symbol_t name);
+void deletesymbol (obj_vptr name);
 void printstring (object *form, pfun_t pfun);
 object *edit (object *fun);
 void superprint (object *form, int lm, pfun_t pfun);
@@ -254,14 +254,23 @@ int glibrary ();
 
 void initfreespace() {
   for (int i=NUM_PAGES-1; i>=0; i--) {
-    free_space *spc = (free_space*) &Heap[i * PAGE_SIZE];
+    free_space *spc = (free_space *)malloc(sizeof(free_space));
+    spc->start = i * PAGE_SIZE;
+    spc->end = (i+1) * PAGE_SIZE;
     spc->next = FreeSpace;
-    spc->size = PAGE_SIZE;
+    spc->prev = nullptr;
+    if (FreeSpace != nullptr) FreeSpace->prev = spc;
     FreeSpace = spc;
   }
 }
 
 void initworkspace () {
+  for (int i=0; i<NUM_PAGES; i++) {
+    Pages[i].base = (object *)&Heap[i * PAGE_SIZE]; 
+  }
+  
+  initfreespace();
+
   Freelist = NULL;
   for (int i=WORKSPACESIZE-1; i>=0; i--) {
     object *obj = &Workspace[i];
@@ -272,91 +281,69 @@ void initworkspace () {
   }
 }
 
-obj_vptr getvptr(object *obj) { 
-  return (uint)obj - (uint)&Heap + BASE_OFFSET;
-}
-
 obj_vptr valloc(size_t size=sizeof(object)) {
   free_space *spc = FreeSpace;
-  free_space *prev = nullptr;
-  size += size % 2;
-  while (spc->size < size) {
-    prev = spc;
+  while ((spc->end - spc->start) < size) {
     spc = spc->next;
     if (spc == nullptr) error2(0, PSTR("no room"));
   }
-  object *obj = (object *)spc;
-  Pages[(uint)spc / PAGE_SIZE].flags |= 1<<DIRTY;
-  if ((spc->size - size - sizeof(free_space)) <= 0) {
-    if (prev != nullptr) prev->next = spc->next;
-    else FreeSpace = spc->next;
-  } else {
-    size_t newsize = spc->size - size;
-    free_space *next = spc->next;
-    spc += size;
-    spc->size = newsize;
-    spc->next = next;
-    if (prev != nullptr) prev->next = spc;
-    else FreeSpace = spc;
+  Pages[spc->start / PAGE_SIZE].flags |= 1<<DIRTY;
+  spc->start += size + (size % 2);
+  if (spc->start == spc->end) {
+    if (spc->next != nullptr) spc->next->prev = spc->prev;
+    if (spc->prev != nullptr) 
+      spc->prev->next = spc->next;
+    else 
+      FreeSpace = spc->next;
+    free(spc);
   }
-  return getvptr(obj);
+  return spc->start;
 }
 
-// Realloc space in a clean heap when collecting;
-void vrealloc(obj_vptr vptr, size_t size=sizeof(object)) {
-  object *obj = getobject(vptr);
+obj_vptr vrealloc(obj_vptr vptr, size_t size=sizeof(object)) {
   free_space *spc = FreeSpace;
-  free_space *prev = nullptr;
-  size += size % 2;
-  while ((uint)spc > (uint)obj) {
-    prev = spc;
+  while (spc != nullptr && spc->start > vptr) {
     spc = spc->next;
     if (spc == nullptr) error2(0, PSTR("no room"));
   }
-  Pages[(uint)spc / PAGE_SIZE].flags |= 1<<DIRTY;
-  if ((uint)spc == (uint)obj) {
-    free_space *prev = spc;
-    spc += size;
-    if (prev == FreeSpace) FreeSpace = spc;
-  }
-  else if ((uint)(spc + spc->size) == (uint)(obj + size)) spc->size -= size;
+  Pages[spc->start / PAGE_SIZE].flags |= 1<<DIRTY;
+  size += (size % 2);
+  if (spc->start == vptr) spc->start += size;  
+  else if (spc->end == (vptr + size)) spc->end -= size;
   else {
-    free_space *next = spc->next;
-    size_t size1 = (uint)obj - (uint)spc;
-    size_t size2 = spc->size - size1 - size;
-    spc->next = spc + size1 + size;
-    spc->size = size1;
-    spc->next->next = next;
-    spc->next->size = size2;
+    free_space *newspc = (free_space *)malloc(sizeof(free_space));
+    newspc->start = vptr + size;
+    newspc->end = spc->end;
+    newspc->next = spc->next;
+    newspc->prev = spc;
+    spc->end = vptr;
+    spc->next->prev = newspc;
+    spc->next = newspc;
   }
 }
 
 void vfree(obj_vptr vptr) {
-  object *obj = getobject(vptr);
   free_space *spc = FreeSpace;
-  free_space *prev = nullptr;
-  while ((uint)spc > (uint)obj) {
-    prev = spc;
+  while (spc->start > vptr) {
     spc = spc->next;
     if (spc == nullptr) return;
   }
-  Pages[(uint)spc / PAGE_SIZE].flags |= 1<<DIRTY;
-
+  Pages[spc->start / PAGE_SIZE].flags |= 1<<DIRTY;
+  object *obj = getobject(vptr);
   size_t size = sizeof(object);
-  if (obj->type == CSTRING) {
-    size_t len = strlen(obj->cstr);
+  if (symbolp(obj)) {
+    size_t len = strlen(obj->name);
     size = sizeof(type) + len + 1 + ((len + 1) % 2);
   }
-
-  if ((((uint)spc + spc->size) == (uint)obj && ((uint)spc->next % PAGE_SIZE) != 0) && 
-      ((uint)spc->next == ((uint)obj + size))) {
-    spc->next = spc->next->next;
-    spc->size += size + spc->next->size;
-  } else if (((uint)spc + spc->size) == (uint)obj && (((uint)spc + spc->size) % PAGE_SIZE) != 0) spc->size += size;  
-  else if ((uint)spc->next == ((uint)obj + size) && (((uint)spc->next % PAGE_SIZE) != 0)) {
-    free_space *newspc = spc->next - size;
+  if (spc->end == vptr && ((spc->end % PAGE_SIZE) != 0)) spc->end += size;  
+  else if (spc->next->start == (vptr + size) && ((spc->next->start % PAGE_SIZE) != 0)) spc->next->start -= size;
+  else {
+    free_space *newspc = (free_space *)malloc(sizeof(free_space));
+    newspc->start = vptr;
+    newspc->end = vptr + size;
     newspc->next = spc->next;
-    newspc->size = spc->size + size;
+    newspc->prev = spc;
+    spc->next->prev = newspc;
     spc->next = newspc;
   }
 }
@@ -406,18 +393,24 @@ object *cons (object *arg1, object *arg2) {
   return ptr;
 }
 
-object *symbol (symbol_t name) {
-  object *ptr = myalloc();
+obj_vptr symbol (const char *name) {
+  size_t len = strlen(name);
+  size_t size = sizeof(type) + len + 1 + ((len + 1) % 2);
+  obj_vptr vptr = valloc(size);
+  object *ptr = getobject(vptr);
   ptr->type = SYMBOL;
-  ptr->name = name;
-  return ptr;
+  strcpy(ptr->name, name);
+  return vptr;
 }
 
-object *newsymbol (symbol_t name) {
-  for (int i=WORKSPACESIZE-1; i>=0; i--) {
-    object *obj = &Workspace[i];
-    if (obj->type == SYMBOL && obj->name == name) return obj;
-  }
+obj_vptr newsymbol (char *name) {
+  obj_vptr vptr = SymbolList;
+  object *obj;
+  do {
+    obj = getobject(vptr);
+    if (strcmp(obj->name, name) == 0) return vptr;
+    vptr = obj->vcdr;
+  } while (vptr != nullvptr);
   return symbol(name);
 }
 
@@ -431,9 +424,8 @@ object *stream (unsigned char streamtype, unsigned char address) {
 // Garbage collection
 
 object *getobject(obj_vptr vptr) {
-  vptr -= BASE_OFFSET;
-  //uint page = vptr / PAGE_SIZE;
-  //uint offset = vptr % PAGE_SIZE;
+  uint page = vptr / PAGE_SIZE;
+  uint offset = vptr % PAGE_SIZE;
   object* obj = (object *)&Heap[vptr];
   return obj;
 }
@@ -444,7 +436,43 @@ obj_vptr addobject(object *obj, size_t size=sizeof(object)) {
   if (obj != newobj) memcpy(newobj, obj, size);
 }
 
-void markobject (object *obj) {
+// inline boolean markedp(obj_vptr vptr) {
+//   return marked(getobject(vptr));
+// }
+
+// void markobject(obj_vptr vptr) {
+//   MARK:
+//   if (markedp(vptr)) return;
+
+//   object *obj = getobject(vptr);
+//   //object* arg = getobject(obj->vcar);
+  
+//   unsigned int type = obj->type;
+//   mark(obj);
+  
+//   if (type >= PAIR || type == ZERO) { // cons
+//     markobject(obj->vcar);
+//     vptr = obj->vcdr;
+//     goto MARK;
+//   }
+
+//   if (type == STRING) {
+//     vptr = obj->vcdr;
+//     obj_vptr varg = obj->vcar;
+//     while (vptr != NULL) {
+//       obj = getobject(vptr);
+//       varg = obj->vcar;
+//       mark(obj);
+//       vptr = varg;
+//     }
+//   }
+// }
+
+// inline void unmarkobject(obj_vptr vptr) {
+//   unmark(getobject(vptr));
+// }
+
+void markobject_ (object *obj) {
   MARK:
   if (obj == NULL) return;
   if (marked(obj)) return;
@@ -454,7 +482,7 @@ void markobject (object *obj) {
   mark(obj);
   
   if (type >= PAIR || type == ZERO) { // cons
-    markobject(arg);
+    markobject_(arg);
     obj = cdr(obj);
     goto MARK;
   }
@@ -479,7 +507,7 @@ void sweep () {
 }
 
 void gc (object *form, object *env) {
-    while (FreeSpace != nullptr) {
+  while (FreeSpace != nullptr) {
     free_space *next = FreeSpace->next;
     free(FreeSpace);
     FreeSpace = next;
@@ -490,15 +518,15 @@ void gc (object *form, object *env) {
   // vrealloc(GCStack);
   // vrealloc(form);
   // vrealloc(env);
-  
+
   #if defined(printgcs)
   int start = Freespace;
   #endif
-  markobject(tee);
-  markobject(GlobalEnv);
-  markobject(GCStack);
-  markobject(form);
-  markobject(env);
+  //markobject_(tee);
+  markobject_(GlobalEnv);
+  markobject_(GCStack);
+  markobject_(form);
+  markobject_(env);
   sweep();
   #if defined(printgcs)
   pfl(pserial); pserial('{'); pint(Freespace - start, pserial); pserial('}');
@@ -531,9 +559,9 @@ void movepointer (object *from, object *to) {
 }
   
 int compactimage (object **arg) {
-  markobject(tee);
-  markobject(GlobalEnv);
-  markobject(GCStack);
+  //markobject_(tee);
+  markobject_(GlobalEnv);
+  markobject_(GCStack);
   object *firstfree = Workspace;
   while (marked(firstfree)) firstfree++;
   object *obj = &Workspace[WORKSPACESIZE-1];
@@ -557,7 +585,10 @@ int compactimage (object **arg) {
 // Make SD card filename
 
 char *MakeFilename (object *arg) {
-  char *buffer = SymbolTop;
+  obj_vptr vptr = valloc(128);
+  object *obj = getobject(vptr);
+  obj->type = CSTRING;
+  char *buffer = obj->name;
   int max = maxbuffer(buffer);
   buffer[0]='/';
   int i = 1;
@@ -604,10 +635,7 @@ unsigned int saveimage (object *arg) {
   SDWriteInt(file, imagesize);
   SDWriteInt(file, (uintptr_t)GlobalEnv);
   SDWriteInt(file, (uintptr_t)GCStack);
-  #if SYMBOLTABLESIZE > BUFFERSIZE
-  SDWriteInt(file, (uintptr_t)SymbolTop);
-  for (int i=0; i<SYMBOLTABLESIZE; i++) file.write(SymbolTable[i]);
-  #endif
+  SDWriteInt(file, (uintptr_t)SymbolList);
   for (unsigned int i=0; i<imagesize; i++) {
     object *obj = &Workspace[i];
     SDWriteInt(file, (uintptr_t)car(obj));
@@ -625,10 +653,7 @@ unsigned int saveimage (object *arg) {
   EpromWriteInt(&addr, imagesize);
   EpromWriteInt(&addr, (uintptr_t)GlobalEnv);
   EpromWriteInt(&addr, (uintptr_t)GCStack);
-  #if SYMBOLTABLESIZE > BUFFERSIZE
-  EpromWriteInt(&addr, (uintptr_t)SymbolTop);
-  for (int i=0; i<SYMBOLTABLESIZE; i++) EEPROM.write(addr++, SymbolTable[i]);
-  #endif
+  EpromWriteInt(&addr, (uintptr_t)SymboList);
   for (unsigned int i=0; i<imagesize; i++) {
     object *obj = &Workspace[i];
     EpromWriteInt(&addr, (uintptr_t)car(obj));
@@ -655,10 +680,7 @@ unsigned int saveimage (object *arg) {
   SpiffsWriteInt(file, imagesize);
   SpiffsWriteInt(file, (uintptr_t)GlobalEnv);
   SpiffsWriteInt(file, (uintptr_t)GCStack);
-  #if SYMBOLTABLESIZE > BUFFERSIZE
-  SpiffsWriteInt(file, (uintptr_t)SymbolTop);
-  for (int i=0; i<SYMBOLTABLESIZE; i++) file.write(SymbolTable[i]);
-  #endif
+  SpiffsWriteInt(file, (uintptr_t)SymbolList);
   for (unsigned int i=0; i<imagesize; i++) {
     object *obj = &Workspace[i];
     SpiffsWriteInt(file, (uintptr_t)car(obj));
@@ -792,7 +814,7 @@ void autorunimage () {
 
 // Error handling
 
-void errorsub (symbol_t fname, PGM_P string) {
+void errorsub (function fname, PGM_P string) {
   pfl(pserial); pfstring(PSTR("Error: "), pserial);
   if (fname) {
     pserial('\''); 
@@ -802,7 +824,7 @@ void errorsub (symbol_t fname, PGM_P string) {
   pfstring(string, pserial);
 }
 
-void error (symbol_t fname, PGM_P string, object *symbol) {
+void error (function fname, PGM_P string, object *symbol) {
   errorsub(fname, string);
   pfstring(PSTR(": "), pserial); printobject(symbol, pserial);
   pln(pserial);
@@ -810,7 +832,7 @@ void error (symbol_t fname, PGM_P string, object *symbol) {
   longjmp(exception, 1);
 }
 
-void error2 (symbol_t fname, PGM_P string) {
+void error2 (function fname, PGM_P string) {
   errorsub(fname, string);
   pln(pserial);
   GCStack = NULL;
@@ -830,32 +852,32 @@ const char resultproper[] PROGMEM = "result is not a proper list";
 
 // Tracing
 
-boolean tracing (symbol_t name) {
+boolean tracing (char *name) {
   int i = 0;
   while (i < TRACEMAX) {
-    if (TraceFn[i] == name) return i+1;
+    if (TraceFn[i] == (function)builtin(name)) return i+1;
     i++;
   }
   return 0;
 }
 
-void trace (symbol_t name) {
-  if (tracing(name)) error(TRACE, PSTR("already being traced"), symbol(name));
+void trace (char *name) {
+  if (tracing(name)) error(TRACE, PSTR("already being traced"), getobject(symbol(name)));
   int i = 0;
   while (i < TRACEMAX) {
-    if (TraceFn[i] == 0) { TraceFn[i] = name; TraceDepth[i] = 0; return; }
+    if (TraceFn[i] == 0) { TraceFn[i] = (function)builtin(name); TraceDepth[i] = 0; return; }
     i++;
   }
   error2(TRACE, PSTR("already tracing 3 functions"));
 }
 
-void untrace (symbol_t name) {
+void untrace (char *name) {
   int i = 0;
   while (i < TRACEMAX) {
-    if (TraceFn[i] == name) { TraceFn[i] = 0; return; }
+    if (TraceFn[i] == builtin(name)) { TraceFn[i] = (function)0; return; }
     i++;
   }
-  error(UNTRACE, PSTR("not tracing"), symbol(name));
+  error(UNTRACE, PSTR("not tracing"), getobject(symbol(name)));
 }
 
 // Helper functions
@@ -913,30 +935,22 @@ int digitvalue (char d) {
   return 16;
 }
 
-char *symbolname (symbol_t x) {
-  if (x < ENDFUNCTIONS) return lookupbuiltin(x);
-  else if (x >= BASE_OFFSET) return lookupsymbol(x);
-  char *buffer = SymbolTop;
-  buffer[3] = '\0';
-  for (int n=2; n>=0; n--) {
-    buffer[n] = fromradix40(x % 40);
-    x = x / 40;
-  }
-  return buffer;
+char *symbolname (obj_vptr x) {
+  return getobject(x)->name;
 }
 
-int checkinteger (symbol_t name, object *obj) {
+int checkinteger (obj_vptr name, object *obj) {
   if (!integerp(obj)) error(name, PSTR("argument is not an integer"), obj);
   return obj->integer;
 }
 
-float checkintfloat (symbol_t name, object *obj){
+float checkintfloat (obj_vptr name, object *obj){
   if (integerp(obj)) return obj->integer;
   if (floatp(obj)) return obj->single_float;
   error(name, notanumber, obj);
 }
 
-int checkchar (symbol_t name, object *obj) {
+int checkchar (obj_vptr name, object *obj) {
   if (!characterp(obj)) error(name, PSTR("argument is not a character"), obj);
   return obj->integer;
 }
@@ -946,13 +960,13 @@ int isstream (object *obj){
   return obj->integer;
 }
 
-int issymbol (object *obj, symbol_t n) {
-  return symbolp(obj) && obj->name == n;
+int issymbol (object *obj, obj_vptr n) {
+  return symbolp(obj) && strcmp(obj->name, getobject(n)->name) == 0;
 }
 
-void checkargs (symbol_t name, object *args) {
+void checkargs (obj_vptr name, object *args) {
   int nargs = listlength(name, args);
-  if (name >= ENDFUNCTIONS) error(0, PSTR("not valid here"), symbol(name));
+  if (name >= ENDFUNCTIONS) error(0, PSTR("not valid here"), getobject(name));
   if (nargs<lookupmin(name)) error2(name, PSTR("has too few arguments"));
   if (nargs>lookupmax(name)) error2(name, PSTR("has too many arguments"));
 }
@@ -968,7 +982,7 @@ int eq (object *arg1, object *arg2) {
   return false;
 }
 
-int listlength (symbol_t name, object *list) {
+int listlength (obj_vptr name, object *list) {
   int length = 0;
   while (list != NULL) {
     if (improperp(list)) error2(name, notproper);
@@ -1074,9 +1088,13 @@ char nthchar (object *string, int n) {
   return (arg->integer)>>(n*8) & 0xFF;
 }
 
-char *cstringbuf (object *arg) {
-  cstring(arg, SymbolTop, SYMBOLTABLESIZE-(SymbolTop-SymbolTable));
-  return SymbolTop;
+char *cstringbuf (object *form) {
+  int buflen = stringlength(form);
+  obj_vptr vptr = valloc(sizeof(type) + buflen);
+  object *obj = getobject(vptr);
+  obj->type = CSTRING;
+  cstring(form, obj->name, buflen);
+  return obj->name;
 }
 
 char *cstring (object *form, char *buffer, int buflen) {
@@ -1114,7 +1132,7 @@ object *lispstring (char *s) {
 
 // Lookup variable in environment
 
-object *value (symbol_t n, object *env) {
+object *value (obj_vptr n, object *env) {
   while (env != NULL) {
     object *pair = car(env);
     if (pair != NULL && car(pair)->name == n) return pair;
@@ -1124,7 +1142,7 @@ object *value (symbol_t n, object *env) {
 }
 
 object *findvalue (object *var, object *env) {
-  symbol_t varname = var->name;
+  obj_vptr varname = var->name;
   object *pair = value(varname, env);
   if (pair == NULL) pair = value(varname, GlobalEnv);
   if (pair == NULL) error(0, PSTR("unknown variable"), var);
@@ -1133,13 +1151,13 @@ object *findvalue (object *var, object *env) {
 
 // Handling closures
   
-object *closure (int tc, symbol_t name, object *state, object *function, object *args, object **env) {
+object *closure (int tc, char *name, object *state, object *function, object *args, object **env) {
   int trace = 0;
   if (name) trace = tracing(name);
   if (trace) {
     indent(TraceDepth[trace-1]<<1, pserial);
     pint(TraceDepth[trace-1]++, pserial);
-    pserial(':'); pserial(' '); pserial('('); pstring(symbolname(name), pserial);
+    pserial(':'); pserial(' '); pserial('('); pstring(name, pserial);
   }
   object *params = first(function);
   function = cdr(function);
@@ -1161,16 +1179,16 @@ object *closure (int tc, symbol_t name, object *state, object *function, object 
   while (params != NULL) {
     object *value;
     object *var = first(params);
-    if (symbolp(var) && var->name == OPTIONAL) optional = true;  
+    if (symbolp(var) && builtin(var->name) == OPTIONAL) optional = true;  
     else {
       if (consp(var)) {
-        if (!optional) error(name, PSTR("invalid default value"), var);
+        if (!optional) error(builtin(name), PSTR("invalid default value"), var);
         if (args == NULL) value = eval(second(var), *env);
         else { value = first(args); args = cdr(args); }
         var = first(var);
-        if (!symbolp(var)) error(name, PSTR("illegal optional parameter"), var); 
+        if (!symbolp(var)) error(builtin(name), PSTR("illegal optional parameter"), var); 
       } else if (!symbolp(var)) {
-        error2(name, PSTR("illegal parameter"));     
+        error2(builtin(name), PSTR("illegal parameter"));     
       } else if (var->name == AMPREST) {
         params = cdr(params);
         var = first(params);
@@ -1180,7 +1198,7 @@ object *closure (int tc, symbol_t name, object *state, object *function, object 
         if (args == NULL) {
           if (optional) value = nil; 
           else {
-            if (name) error2(name, PSTR("has too few arguments"));
+            if (name) error2(builtin(name), PSTR("has too few arguments"));
             else error2(0, PSTR("function has too few arguments"));
           }
         } else { value = first(args); args = cdr(args); }
@@ -1191,7 +1209,7 @@ object *closure (int tc, symbol_t name, object *state, object *function, object 
     params = cdr(params);  
   }
   if (args != NULL) {
-    if (name) error2(name, PSTR("has too many arguments"));
+    if (name) error2(builtin(name), PSTR("has too many arguments"));
     else error2(0, PSTR("function has too many arguments"));
   }
   if (trace) { pserial(')'); pln(pserial); }
@@ -1200,9 +1218,9 @@ object *closure (int tc, symbol_t name, object *state, object *function, object 
   return tf_progn(function, *env);
 }
 
-object *apply (symbol_t name, object *function, object *args, object *env) {
+object *apply (obj_vptr name, object *function, object *args, object *env) {
   if (symbolp(function)) {
-    symbol_t fname = function->name;
+    obj_vptr fname = function->name;
     checkargs(fname, args);
     return ((fn_ptr_type)lookupfn(fname))(args, env);
   }
@@ -1222,7 +1240,7 @@ object *apply (symbol_t name, object *function, object *args, object *env) {
 
 // In-place operations
 
-object **place (symbol_t name, object *args, object *env) {
+object **place (obj_vptr name, object *args, object *env) {
   if (atom(args)) return &cdr(findvalue(args, env));
   object* function = first(args);
   if (issymbol(function, CAR) || issymbol(function, FIRST)) {
@@ -1465,7 +1483,7 @@ object *sp_defun (object *args, object *env) {
   checkargs(DEFUN, args);
   object *var = first(args);
   if (var->type != SYMBOL) error(DEFUN, PSTR("not a symbol"), var);
-  object *val = cons(symbol(LAMBDA), cdr(args));
+  object *val = cons(getobject(symbol(lookupbuiltin()LAMBDA)), cdr(args));
   object *pair = value(var->name,GlobalEnv);
   if (pair != NULL) { cdr(pair) = val; return var; }
   push(cons(var, val), GlobalEnv);
@@ -1683,7 +1701,7 @@ object *sp_trace (object *args, object *env) {
   }
   int i = 0;
   while (i < TRACEMAX) {
-    if (TraceFn[i] != 0) args = cons(symbol(TraceFn[i]), args);
+    if (TraceFn[i] != 0) args = cons(getobject(symbol(lookupbuiltin(TraceFn[i]))), args);
     i++;
   }
   return args;
@@ -1694,8 +1712,8 @@ object *sp_untrace (object *args, object *env) {
   if (args == NULL) {
     int i = 0;
     while (i < TRACEMAX) {
-      if (TraceFn[i] != 0) args = cons(symbol(TraceFn[i]), args);
-      TraceFn[i] = 0;
+      if (TraceFn[i] != 0) args = cons(getobject(symbol(lookupbuiltin(TraceFn[i]))), args);
+      TraceFn[i] = (function)0;
       i++;
     }
   } else {
@@ -1939,14 +1957,14 @@ object *tf_case (object *args, object *env) {
         if (eq(test,car(key))) return tf_progn(forms, env);
         key = cdr(key);
       }
-    } else if (eq(test,key) || eq(key,tee)) return tf_progn(forms, env);
+    } else if (eq(test,key) || eq(key,getobject(tee))) return tf_progn(forms, env);
     args = cdr(args);
   }
   return nil;
 }
 
 object *tf_and (object *args, object *env) {
-  if (args == NULL) return tee;
+  if (args == NULL) return getobject(tee);
   object *more = cdr(args);
   while (more != NULL) {
     if (eval(car(args), env) == NULL) return nil;
@@ -1968,7 +1986,7 @@ object *tf_or (object *args, object *env) {
 
 object *fn_not (object *args, object *env) {
   (void) env;
-  return (first(args) == nil) ? tee : nil;
+  return (first(args) == nil) ? getobject(tee) : nil;
 }
 
 object *fn_cons (object *args, object *env) {
@@ -1978,34 +1996,34 @@ object *fn_cons (object *args, object *env) {
 
 object *fn_atom (object *args, object *env) {
   (void) env;
-  return atom(first(args)) ? tee : nil;
+  return atom(first(args)) ? getobject(tee) : nil;
 }
 
 object *fn_listp (object *args, object *env) {
   (void) env;
-  return listp(first(args)) ? tee : nil;
+  return listp(first(args)) ? getobject(tee) : nil;
 }
 
 object *fn_consp (object *args, object *env) {
   (void) env;
-  return consp(first(args)) ? tee : nil;
+  return consp(first(args)) ? getobject(tee) : nil;
 }
 
 object *fn_symbolp (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  return symbolp(arg) ? tee : nil;
+  return symbolp(arg) ? getobject(tee) : nil;
 }
 
 object *fn_streamp (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  return streamp(arg) ? tee : nil;
+  return streamp(arg) ? getobject(tee) : nil;
 }
 
 object *fn_eq (object *args, object *env) {
   (void) env;
-  return eq(first(args), second(args)) ? tee : nil;
+  return eq(first(args), second(args)) ? getobject(tee) : nil;
 }
 
 // List functions
@@ -2309,6 +2327,7 @@ object *negate (object *arg) {
     else return number(-result);
   } else if (floatp(arg)) return makefloat(-(arg->single_float));
   else error(SUBTRACT, notanumber, arg);
+  return nullptr;
 }
 
 object *fn_subtract (object *args, object *env) {
@@ -2515,7 +2534,7 @@ object *fn_noteq (object *args, object *env) {
     }
     args = cdr(args);
   }
-  return tee;
+  return getobject(tee);
 }
 
 object *fn_numeq (object *args, object *env) {
@@ -2530,7 +2549,7 @@ object *fn_numeq (object *args, object *env) {
     arg1 = arg2;
     args = cdr(args);
   }
-  return tee;
+  return getobject(tee);
 }
 
 object *fn_less (object *args, object *env) {
@@ -2545,7 +2564,7 @@ object *fn_less (object *args, object *env) {
     arg1 = arg2;
     args = cdr(args);
   }
-  return tee;
+  return getobject(tee);
 }
 
 object *fn_lesseq (object *args, object *env) {
@@ -2560,7 +2579,7 @@ object *fn_lesseq (object *args, object *env) {
     arg1 = arg2;
     args = cdr(args);
   }
-  return tee;
+  return getobject(tee);
 }
 
 object *fn_greater (object *args, object *env) {
@@ -2575,7 +2594,7 @@ object *fn_greater (object *args, object *env) {
     arg1 = arg2;
     args = cdr(args);
   }
-  return tee;
+  return getobject(tee);
 }
 
 object *fn_greatereq (object *args, object *env) {
@@ -2590,56 +2609,56 @@ object *fn_greatereq (object *args, object *env) {
     arg1 = arg2;
     args = cdr(args);
   }
-  return tee;
+  return getobject(tee);
 }
 
 object *fn_plusp (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  if (floatp(arg)) return ((arg->single_float) > 0.0) ? tee : nil;
-  else if (integerp(arg)) return ((arg->integer) > 0) ? tee : nil;
+  if (floatp(arg)) return ((arg->single_float) > 0.0) ? getobject(tee) : nil;
+  else if (integerp(arg)) return ((arg->integer) > 0) ? getobject(tee) : nil;
   else error(PLUSP, notanumber, arg);
 }
 
 object *fn_minusp (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  if (floatp(arg)) return ((arg->single_float) < 0.0) ? tee : nil;
-  else if (integerp(arg)) return ((arg->integer) < 0) ? tee : nil;
+  if (floatp(arg)) return ((arg->single_float) < 0.0) ? getobject(tee) : nil;
+  else if (integerp(arg)) return ((arg->integer) < 0) ? getobject(tee) : nil;
   else error(MINUSP, notanumber, arg);
 }
 
 object *fn_zerop (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  if (floatp(arg)) return ((arg->single_float) == 0.0) ? tee : nil;
-  else if (integerp(arg)) return ((arg->integer) == 0) ? tee : nil;
+  if (floatp(arg)) return ((arg->single_float) == 0.0) ? getobject(tee) : nil;
+  else if (integerp(arg)) return ((arg->integer) == 0) ? getobject(tee) : nil;
   else error(ZEROP, notanumber, arg);
 }
 
 object *fn_oddp (object *args, object *env) {
   (void) env;
   int arg = checkinteger(ODDP, first(args));
-  return ((arg & 1) == 1) ? tee : nil;
+  return ((arg & 1) == 1) ? getobject(tee) : nil;
 }
 
 object *fn_evenp (object *args, object *env) {
   (void) env;
   int arg = checkinteger(EVENP, first(args));
-  return ((arg & 1) == 0) ? tee : nil;
+  return ((arg & 1) == 0) ? getobject(tee) : nil;
 }
 
 // Number functions
 
 object *fn_integerp (object *args, object *env) {
   (void) env;
-  return integerp(first(args)) ? tee : nil;
+  return integerp(first(args)) ? getobject(tee) : nil;
 }
 
 object *fn_numberp (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  return (integerp(arg) || floatp(arg)) ? tee : nil;
+  return (integerp(arg) || floatp(arg)) ? getobject(tee) : nil;
 }
 
 // Floating-point functions
@@ -2652,7 +2671,7 @@ object *fn_floatfn (object *args, object *env) {
 
 object *fn_floatp (object *args, object *env) {
   (void) env;
-  return floatp(first(args)) ? tee : nil;
+  return floatp(first(args)) ? getobject(tee) : nil;
 }
 
 object *fn_sin (object *args, object *env) {
@@ -2803,17 +2822,17 @@ object *fn_codechar (object *args, object *env) {
 
 object *fn_characterp (object *args, object *env) {
   (void) env;
-  return characterp(first(args)) ? tee : nil;
+  return characterp(first(args)) ? getobject(tee) : nil;
 }
 
 // Strings
 
 object *fn_stringp (object *args, object *env) {
   (void) env;
-  return stringp(first(args)) ? tee : nil;
+  return stringp(first(args)) ? getobject(tee) : nil;
 }
 
-bool stringcompare (symbol_t name, object *args, bool lt, bool gt, bool eq) {
+bool stringcompare (obj_vptr name, object *args, bool lt, bool gt, bool eq) {
   object *arg1 = first(args); if (!stringp(arg1)) error(name, notastring, arg1);
   object *arg2 = second(args); if (!stringp(arg2)) error(name, notastring, arg2); 
   arg1 = cdr(arg1);
@@ -2831,17 +2850,17 @@ bool stringcompare (symbol_t name, object *args, bool lt, bool gt, bool eq) {
 
 object *fn_stringeq (object *args, object *env) {
   (void) env;
-  return stringcompare(STRINGEQ, args, false, false, true) ? tee : nil;
+  return stringcompare(STRINGEQ, args, false, false, true) ? getobject(tee) : nil;
 }
 
 object *fn_stringless (object *args, object *env) {
   (void) env;
-  return stringcompare(STRINGLESS, args, true, false, false) ? tee : nil;
+  return stringcompare(STRINGLESS, args, true, false, false) ? getobject(tee) : nil;
 }
 
 object *fn_stringgreater (object *args, object *env) {
   (void) env;
-  return stringcompare(STRINGGREATER, args, false, true, false) ? tee : nil;
+  return stringcompare(STRINGGREATER, args, false, true, false) ? getobject(tee) : nil;
 }
 
 object *fn_sort (object *args, object *env) {
@@ -2884,7 +2903,7 @@ object *fn_stringfn (object *args, object *env) {
     cell->integer = (arg->integer)<<shift;
     obj->cdr = cell;
   } else if (type == SYMBOL) {
-    char *s = symbolname(arg->name);
+    char *s = arg->name;
     char ch = *s++;
     object *head = NULL;
     int chars = 0;
@@ -2901,7 +2920,7 @@ object *fn_stringfn (object *args, object *env) {
 object *fn_concatenate (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  symbol_t name = arg->name;
+  obj_vptr name = builtin(arg->name);
   if (name != STRINGFN) error2(CONCATENATE, PSTR("only supports strings"));
   args = cdr(args);
   object *result = myalloc();
@@ -3048,7 +3067,7 @@ object *fn_logbitp (object *args, object *env) {
   (void) env;
   int index = checkinteger(LOGBITP, first(args));
   int value = checkinteger(LOGBITP, second(args));
-  return (bitRead(value, index) == 1) ? tee : nil;
+  return (bitRead(value, index) == 1) ? getobject(tee) : nil;
 }
 
 // System functions
@@ -3060,7 +3079,7 @@ object *fn_eval (object *args, object *env) {
 object *fn_globals (object *args, object *env) {
   (void) args;
   if (GlobalEnv == NULL) return nil;
-  return fn_mapcar(cons(symbol(CAR),cons(GlobalEnv,nil)), env);
+  return fn_mapcar(cons(getobject(symbol(lookupbuiltin(CAR))),cons(GlobalEnv,nil)), env);
 }
 
 object *fn_locals (object *args, object *env) {
@@ -3183,7 +3202,7 @@ object *fn_restarti2c (object *args, object *env) {
   }
   int address = stream & 0xFF;
   if (stream>>8 != I2CSTREAM) error2(RESTARTI2C, PSTR("not an i2c stream"));
-  return I2Crestart(address, read) ? tee : nil;
+  return I2Crestart(address, read) ? getobject(tee) : nil;
 }
 
 object *fn_gc (object *obj, object *env) {
@@ -3242,7 +3261,7 @@ object *fn_pinmode (object *args, object *env) {
 object *fn_digitalread (object *args, object *env) {
   (void) env;
   int pin = checkinteger(DIGITALREAD, first(args));
-  if (digitalRead(pin) != 0) return tee; else return nil;
+  if (digitalRead(pin) != 0) return getobject(tee); else return nil;
 }
 
 object *fn_digitalwrite (object *args, object *env) {
@@ -3349,7 +3368,7 @@ int atomwidth (object *obj) {
 }
 
 boolean quoted (object *obj) {
-  return (consp(obj) && car(obj) != NULL && car(obj)->name == QUOTE && consp(cdr(obj)) && cddr(obj) == NULL);
+  return (consp(obj) && car(obj) != NULL && builtin(car(obj)->name) == QUOTE && consp(cdr(obj)) && cddr(obj) == NULL);
 }
 
 int subwidth (object *obj, int w) {
@@ -3369,7 +3388,7 @@ int subwidthlist (object *form, int w) {
 
 void superprint (object *form, int lm, pfun_t pfun) {
   if (atom(form)) {
-    if (symbolp(form) && form->name == NOTHING) pstring(symbolname(form->name), pfun);
+    if (symbolp(form) && builtin(form->name) == NOTHING) pstring(form->name, pfun);
     else printobject(form, pfun);
   }
   else if (quoted(form)) { pfun('\''); superprint(car(cdr(form)), lm + 1, pfun); }
@@ -3385,7 +3404,7 @@ void supersub (object *form, int lm, int super, pfun_t pfun) {
   int special = 0, separate = 1;
   object *arg = car(form);
   if (symbolp(arg)) {
-    int name = arg->name;
+    int name = builtin(arg->name);
     if (name == DEFUN) special = 2;
     else for (int i=0; i<ppspecials; i++) {
       if (name == ppspecial[i]) { special = 1; break; }   
@@ -3409,7 +3428,7 @@ object *fn_pprint (object *args, object *env) {
   pfun_t pfun = pstreamfun(cdr(args));
   pln(pfun);
   superprint(obj, 0, pfun);
-  return symbol(NOTHING);
+  return getobject(symbol(lookupbuiltin(NOTHING)));
 }
 
 object *fn_pprintall (object *args, object *env) {
@@ -3420,16 +3439,17 @@ object *fn_pprintall (object *args, object *env) {
     object *var = car(pair);
     object *val = cdr(pair);
     pln(pserial);
-    if (consp(val) && symbolp(car(val)) && car(val)->name == LAMBDA) {
-      superprint(cons(symbol(DEFUN), cons(var, cdr(val))), 0, pserial);
+    if (consp(val) && symbolp(car(val)) && builtin(car(val)->name) == LAMBDA) {
+      superprint(cons(getobject(symbol(lookupbuiltin(DEFUN))), cons(var, cdr(val))), 0, pserial);
     } else {
-      superprint(cons(symbol(DEFVAR),cons(var,cons(cons(symbol(QUOTE),cons(val,NULL))
+      superprint(cons(getobject(symbol(lookupbuiltin(DEFVAR))),
+                 cons(var,cons(cons(getobject(symbol(lookupbuiltin(QUOTE))),cons(val,NULL))
       ,NULL))), 0, pserial);
     }
     pln(pserial);
     globals = cdr(globals);
   }
-  return symbol(NOTHING);
+  return getobject(symbol(lookupbuiltin(NOTHING)));
 }
 
 // LispLibrary
@@ -3448,10 +3468,10 @@ object *fn_require (object *args, object *env) {
   object *line = read(glibrary);
   while (line != NULL) {
     // Is this the definition we want
-    int fname = first(line)->name;
+    int fname = builtin(first(line)->name);
     if ((fname == DEFUN || fname == DEFVAR) && symbolp(second(line)) && second(line)->name == arg->name) {
       eval(line, env);
-      return tee;
+      return getobject(tee);
     }
     line = read(glibrary);
   }
@@ -3463,13 +3483,13 @@ object *fn_listlibrary (object *args, object *env) {
   GlobalStringIndex = 0;
   object *line = read(glibrary);
   while (line != NULL) {
-    int fname = first(line)->name;
+    int fname = builtin(first(line)->name);
     if (fname == DEFUN || fname == DEFVAR) {
-      pstring(symbolname(second(line)->name), pserial); pserial(' ');
+      pstring(second(line)->name, pserial); pserial(' ');
     }
     line = read(glibrary);
   }
-  return symbol(NOTHING); 
+  return getobject(symbol(lookupbuiltin(NOTHING))); 
 }
 
 // Wi-fi
@@ -3489,7 +3509,7 @@ object *fn_wifiserver (object *args, object *env) {
 object *fn_wifisoftap (object *args, object *env) {
   (void) env;
   char ssid[33], pass[65];
-  if (args == NULL) return WiFi.softAPdisconnect(true) ? tee : nil;
+  if (args == NULL) return WiFi.softAPdisconnect(true) ? getobject(tee) : nil;
   object *first = first(args); args = cdr(args);
   if (args == NULL) WiFi.softAP(cstring(first, ssid, 33));
   else {
@@ -3510,7 +3530,7 @@ object *fn_wifisoftap (object *args, object *env) {
 object *fn_connected (object *args, object *env) {
   (void) env;
   if (isstream(first(args))>>8 != WIFISTREAM) error2(CONNECTED, PSTR("invalid stream"));
-  return client.connected() ? tee : nil;
+  return client.connected() ? getobject(tee) : nil;
 }
 
 object *fn_wifilocalip (object *args, object *env) {
@@ -3914,11 +3934,11 @@ const tbl_entry_t lookup_table[] PROGMEM = {
 
 // Table lookup functions
 
-int builtin (char* n) {
+function builtin (char* n) {
   int entry = 0;
   while (entry < ENDFUNCTIONS) {
     if (strcasecmp(n, (char*)lookup_table[entry].string) == 0)
-      return entry;
+      return (function)entry;
     entry++;
   }
   return ENDFUNCTIONS;
@@ -3935,35 +3955,40 @@ int longsymbol (char *buffer) {
     SymbolTop = newtop;
   }
   if (i > 1535) error2(0, PSTR("Too many long symbols"));
-  return i + BASE_OFFSET; // First number unused by radix40
+  return i + 64000; // First number unused by radix40
 }
 
-intptr_t lookupfn (symbol_t name) {
+intptr_t lookupfn (function name) {
   return (intptr_t)lookup_table[name].fptr;
 }
 
-uint8_t lookupmin (symbol_t name) {
+uint8_t lookupmin (function name) {
   return lookup_table[name].min;
 }
 
-uint8_t lookupmax (symbol_t name) {
+uint8_t lookupmax (function name) {
   return lookup_table[name].max;
 }
 
-char *lookupbuiltin (symbol_t name) {
+char *lookupbuiltin (function name) {
   char *buffer = SymbolTop;
   strcpy(buffer, (char *)lookup_table[name].string);
   return buffer;
 }
 
-char *lookupsymbol (symbol_t name) {
+char *lookupsymbol (obj_vptr name) {
+  object *symbol = getobject(SymbolList);
+  while (symbol->cdr != nullptr) {
+
+    symbol = symbol->cdr;
+  }
   char *p = SymbolTable;
-  int i = name - BASE_OFFSET;
+  int i = name - 64000;
   while (i > 0 && p < SymbolTop) {p = p + strlen(p) + 1; i--; }
   if (p == SymbolTop) return NULL; else return p;
 }
 
-void deletesymbol (symbol_t name) {
+void deletesymbol (obj_vptr name) {
   char *p = lookupsymbol(name);
   if (p == NULL) return;
   char *q = p + strlen(p) + 1;
@@ -3998,7 +4023,7 @@ object *eval (object *form, object *env) {
   if (integerp(form) || floatp(form) || characterp(form) || stringp(form)) return form;
 
   if (symbolp(form)) {
-    symbol_t name = form->name;
+    function name = (function)builtin(form->name);
     if (name == NIL) return nil;
     object *pair = value(name, env);
     if (pair != NULL) return cdr(pair);
@@ -4009,17 +4034,18 @@ object *eval (object *form, object *env) {
   }
   
   // It's a list
-  object *function = car(form);
-  object *args = cdr(form);
+  object *function = getobject(form->vcar);
+  object *args = getobject(form->vcdr);
+  function func = lookupbuiltin(function->name);
 
-  if (function == NULL) error(0, PSTR("illegal function"), nil);
+  if (func == NULL) error(0, PSTR("illegal function"), nil);
   if (!listp(args)) error(0, PSTR("can't evaluate a dotted pair"), args);
 
   // List starts with a symbol?
   if (symbolp(function)) {
-    symbol_t name = function->name;
+    function func = builtin(function->name);
 
-    if ((name == LET) || (name == LETSTAR)) {
+    if ((func == LET) || (func == LETSTAR)) {
       int TCstart = TC;
       object *assigns = first(args);
       object *forms = cdr(args);
@@ -4031,7 +4057,7 @@ object *eval (object *form, object *env) {
         else if (cdr(assign) == NULL) push(cons(first(assign),nil), newenv);
         else push(cons(first(assign),eval(second(assign),env)), newenv);
         car(GCStack) = newenv;
-        if (name == LETSTAR) env = newenv;
+        if (func == LETSTAR) env = newenv;
         assigns = cdr(assigns);
       }
       env = newenv;
@@ -4041,7 +4067,7 @@ object *eval (object *form, object *env) {
       goto EVAL;
     }
 
-    if (name == LAMBDA) {
+    if (func == LAMBDA) {
       if (env == NULL) return form;
       object *envcopy = NULL;
       while (env != NULL) {
@@ -4049,12 +4075,12 @@ object *eval (object *form, object *env) {
         if (pair != NULL) push(pair, envcopy);
         env = cdr(env);
       }
-      return cons(symbol(CLOSURE), cons(envcopy,args));
+      return cons(getobject(symbol(lookupbuiltin(CLOSURE))), cons(envcopy,args));
     }
     
-    if (name < SPECIAL_FORMS) error2((int)function, PSTR("can't be used as a function"));
+    if (func < SPECIAL_FORMS) error2((int)function, PSTR("can't be used as a function"));
 
-    if ((name > SPECIAL_FORMS) && (name < TAIL_FORMS)) {
+    if ((func > SPECIAL_FORMS) && (name < TAIL_FORMS)) {
       return ((fn_ptr_type)lookupfn(name))(args, env);
     }
 
@@ -4086,7 +4112,7 @@ object *eval (object *form, object *env) {
   args = cdr(head);
  
   if (symbolp(function)) {
-    symbol_t name = function->name;
+    obj_vptr name = function->name;
     if (name >= ENDFUNCTIONS) error(0, PSTR("not valid here"), fname);
     if (nargs<lookupmin(name)) error2(name, PSTR("has too few arguments"));
     if (nargs>lookupmax(name)) error2(name, PSTR("has too many arguments"));
@@ -4270,7 +4296,7 @@ void printobject (object *form, pfun_t pfun){
     pfun(')');
   } else if (integerp(form)) pint(form->integer, pfun);
   else if (floatp(form)) pfloat(form->single_float, pfun);
-  else if (symbolp(form)) { if (form->name != NOTHING) pstring(symbolname(form->name), pfun); }
+  else if (symbolp(form)) { if (form->name != NOTHING) pstring(form->name, pfun); }
   else if (characterp(form)) pcharacter(form->integer, pfun);
   else if (stringp(form)) printstring(form, pfun);
   else if (streamp(form)) {
@@ -4423,11 +4449,11 @@ object *nextitem (gfun_t gfun) {
     error2(0, PSTR("Unknown character"));
   }
   
-  int x = builtin(buffer);
+  function x = builtin(buffer);
   if (x == NIL) return nil;
-  if (x < ENDFUNCTIONS) return newsymbol(x);
-  else if (index < 4 && valid40(buffer)) return newsymbol(pack40(buffer));
-  else return newsymbol(longsymbol(buffer));
+  if (x < ENDFUNCTIONS) return getobject(newsymbol(x));
+  else if (index < 4 && valid40(buffer)) return getobject(newsymbol(buffer));
+  else return getobject(newsymbol(longsymbol(buffer)));
 }
 
 object *readrest (gfun_t gfun) {
@@ -4439,7 +4465,7 @@ object *readrest (gfun_t gfun) {
     if (item == (object *)BRA) {
       item = readrest(gfun);
     } else if (item == (object *)QUO) {
-      item = cons(symbol(QUOTE), cons(read(gfun), NULL));
+      item = cons(getobject(symbol(lookupbuiltin(QUOTE))), cons(read(gfun), NULL));
     } else if (item == (object *)DOT) {
       tail->cdr = read(gfun);
       if (readrest(gfun) != NULL) error2(0, PSTR("malformed list"));
@@ -4460,7 +4486,7 @@ object *read (gfun_t gfun) {
   if (item == (object *)KET) error2(0, PSTR("incomplete list"));
   if (item == (object *)BRA) return readrest(gfun);
   if (item == (object *)DOT) return read(gfun);
-  if (item == (object *)QUO) return cons(symbol(QUOTE), cons(read(gfun), NULL)); 
+  if (item == (object *)QUO) return cons(getobject(symbol(lookupbuiltin(QUOTE))), cons(read(gfun), NULL)); 
   return item;
 }
 
@@ -4468,7 +4494,7 @@ object *read (gfun_t gfun) {
 
 void initenv () {
   GlobalEnv = NULL;
-  tee = symbol(TEE);
+  tee = symbol("\0x1");
 }
 
 void setup () {
