@@ -1,7 +1,7 @@
 /* uLisp ESP Version 3.0a - www.ulisp.com
    David Johnson-Davies - www.technoblogy.com - 6th December 2019
 
-  Built-in SPIFFS suppoer
+  Built-in SPIFFS support
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -14,7 +14,7 @@
 // #define resetautorun
 #define printfreespace
 #define serialmonitor
-// #define printgcs
+#define printgcs
 // #define sdcardsupport
 // #define eepromsupport
 #define lisplibrary
@@ -68,6 +68,9 @@
 #define marked(x)          ((((uintptr_t)(car(x))) & MARKBIT) != 0)
 #define MARKBIT            1
 
+#define DIRTY              1
+#define SWAPPED            2
+
 #define setflag(x)         (Flags = Flags | 1<<(x))
 #define clrflag(x)         (Flags = Flags & ~(1<<(x)))
 #define tstflag(x)         (Flags & 1<<(x))
@@ -114,9 +117,35 @@ typedef struct sobject {
       };
     };
   };
+
+  // Reference operator
+  sobject* operator&() {
+    // If this > physical memory, then swap memory
+    return this;
+  }
+
+  // Deference operator
+  sobject& operator*() {
+    return *this;
+  }
+
+  // Access operator
+  sobject* operator->() { 
+    return this; 
+  }
 } object;
 
 typedef object *(*fn_ptr_type)(object *, object *);
+
+typedef struct {
+  int id;
+  void* address;  // Physical address
+  int offset;     // First free byte in page;
+  int useCount;
+  int mfuPageId;
+  int lfuPageId;
+  byte flags;     // 1=dirty; 2=swapped
+} page;
 
 typedef struct {
   const char *string;
@@ -154,7 +183,15 @@ typedef int PinMode;
 
 #endif
 
-object Workspace[WORKSPACESIZE] WORDALIGNED;
+#define NUMPAGES 200
+#define NUMPAGESRESIDENT 100
+#define PAGESIZE 64
+
+unsigned int Nursery = 0;
+unsigned int LFU = 1;
+page Pages[NUMPAGES];
+object PageBuffer[NUMPAGESRESIDENT][PAGESIZE] WORDALIGNED;
+
 char SymbolTable[SYMBOLTABLESIZE];
 
 // Global variables
@@ -219,25 +256,100 @@ void supersub (object *form, int lm, int super, pfun_t pfun);
 int subwidthlist (object *form, int w);
 int glibrary ();
 
+/* void mark(object *x) {
+  object *obj = (object *)(((uintptr_t)(car(x))) | MARKBIT);
+  car(x) = obj;
+}
+void unmark(object *x) {
+  object *obj = (object *)(((uintptr_t)(car(x))) & ~MARKBIT);
+  car(x) = obj;
+}
+boolean marked(object *x) {
+  boolean b = (((uintptr_t)(car(x))) & MARKBIT) != 0;
+  return b;
+} */
+
 // Set up workspace
 
-void initworkspace () {
-  Freelist = NULL;
-  for (int i=WORKSPACESIZE-1; i>=0; i--) {
-    object *obj = &Workspace[i];
+void initpagebuffer (object buffer[]) {
+  object *prev = NULL;
+  for (int i=PAGESIZE-1; i>=0; i--) {
+    object *obj = &buffer[i];
     car(obj) = NULL;
-    cdr(obj) = Freelist;
-    Freelist = obj;
-    Freespace++;
+    cdr(obj) = prev;
+    prev = obj;
+  }
+}
+
+void initworkspace () {
+  Freespace = NUMPAGES*PAGESIZE;
+  for (int i=0; i<NUMPAGES; i++) {
+    page *pg = &Pages[i];
+    pg->id = i;
+    pg->offset = 0;
+    pg->useCount = 0;
+    pg->mfuPageId = (i-1+NUMPAGES) % NUMPAGES;
+    pg->lfuPageId = (i+1) % NUMPAGES;
+    pg->flags = 0;
+    if (i < NUMPAGESRESIDENT) {
+      pg->address = &PageBuffer[i];
+      initpagebuffer((object *)pg->address);
+    } else {
+      pg->address = NULL;
+    }
+  }
+}
+
+void savepage (unsigned int pageid) {
+  page pg = Pages[pageid];
+  if (pg.flags & DIRTY == 0) return;
+  pg.flags = SWAPPED;
+  
+}
+
+void loadpage (unsigned int from, unsigned int to) {
+  if (Pages[from].flags & SWAPPED == 0) {
+    initpagebuffer(PageBuffer[to]);
+    Pages[from].address = &PageBuffer[to];
+    Pages[to].address = NULL;
+    return;
   }
 }
 
 object *myalloc () {
-  if (Freespace == 0) error2(0, PSTR("no room"));
-  object *temp = Freelist;
-  Freelist = cdr(Freelist);
+  // Try to allocate in nursery. 
+  page *nursery = &Pages[Nursery];
   Freespace--;
-  return temp;
+  int offset = (nursery->offset+1) % PAGESIZE;
+  object *obj = &PageBuffer[Nursery][offset];
+  while (offset != nursery->offset && obj->car != NULL) {
+    offset = (offset+1) % PAGESIZE;
+    obj = &PageBuffer[Nursery][offset];
+  }
+  if (offset != nursery->offset) {
+    nursery->offset = offset;
+    nursery->flags |= DIRTY;
+    return &PageBuffer[Nursery][offset];
+  }
+
+  // Move nursery to resident LFU page with space available.
+  nursery->offset = PAGESIZE;
+  while (nursery->offset == PAGESIZE && nursery->address != NULL) {
+    Nursery = nursery->lfuPageId;
+    nursery = &Pages[Nursery];
+  }
+  if (nursery->address != NULL) {
+    if (nursery->offset == PAGESIZE) error2(0, PSTR("no room"));
+    offset = nursery->offset;
+    nursery->offset = (offset+1) % PAGESIZE;
+    nursery->flags |= DIRTY;
+    return &PageBuffer[Nursery][offset];
+  }
+
+  // Save page if dirty.
+  if ((nursery->flags & DIRTY) > 0) {
+    savepage(nursery->id);
+  }
 }
 
 inline void myfree (object *obj) {
@@ -285,10 +397,11 @@ object *symbol (symbol_t name) {
 }
 
 object *newsymbol (symbol_t name) {
-  for (int i=WORKSPACESIZE-1; i>=0; i--) {
+  // TODO Check for duplicate symbols
+/*   for (int i=WORKSPACESIZE-1; i>=0; i--) {
     object *obj = &Workspace[i];
     if (obj->type == SYMBOL && obj->name == name) return obj;
-  }
+  } */
   return symbol(name);
 }
 
@@ -318,7 +431,7 @@ void markobject (object *obj) {
 
   if (type == STRING) {
     obj = cdr(obj);
-    while (obj != NULL) {
+    while (obj != NULL && obj->type >= PAIR && !marked(obj)) {
       arg = car(obj);
       mark(obj);
       obj = arg;
@@ -329,15 +442,17 @@ void markobject (object *obj) {
 void sweep () {
   Freelist = NULL;
   Freespace = 0;
-  for (int i=WORKSPACESIZE-1; i>=0; i--) {
-    object *obj = &Workspace[i];
-    if (!marked(obj)) myfree(obj); else unmark(obj);
+  for (int i=0; i<NUMPAGESRESIDENT; i++) {
+    for (int j=0; j<PAGESIZE; j++) {
+      object *obj = &PageBuffer[i][j];
+      if (!marked(obj)) myfree(obj); else unmark(obj);
+    }
   }
 }
 
 void gc (object *form, object *env) {
   #if defined(printgcs)
-  int start = Freespace;
+  int start = Freespace; 
   #endif
   markobject(tee);
   markobject(GlobalEnv);
@@ -353,30 +468,35 @@ void gc (object *form, object *env) {
 // Compact image
 
 void movepointer (object *from, object *to) {
-  for (int i=0; i<WORKSPACESIZE; i++) {
-    object *obj = &Workspace[i];
-    unsigned int type = (obj->type) & ~MARKBIT;
-    if (marked(obj) && (type >= STRING || type==ZERO)) {
-      if (car(obj) == (object *)((uintptr_t)from | MARKBIT)) 
-        car(obj) = (object *)((uintptr_t)to | MARKBIT);
-      if (cdr(obj) == from) cdr(obj) = to;
+  for (int i=0; i<NUMPAGESRESIDENT; i++) {
+    for (int j=0; j<PAGESIZE; j++) {
+      object *obj = &PageBuffer[i][j];
+      unsigned int type = (obj->type) & ~MARKBIT;
+      if (marked(obj) && (type >= STRING || type==ZERO)) {
+        if (car(obj) == (object *)((uintptr_t)from | MARKBIT)) 
+          car(obj) = (object *)((uintptr_t)to | MARKBIT);
+       if (cdr(obj) == from) cdr(obj) = to;
+      } 
     }
   }
+ 
   // Fix strings
-  for (int i=0; i<WORKSPACESIZE; i++) {
-    object *obj = &Workspace[i];
-    if (marked(obj) && ((obj->type) & ~MARKBIT) == STRING) {
-      obj = cdr(obj);
-      while (obj != NULL) {
-        if (cdr(obj) == to) cdr(obj) = from;
-        obj = (object *)((uintptr_t)(car(obj)) & ~MARKBIT);
-      }
+  for (int i=0; i<NUMPAGESRESIDENT; i++) {
+    for (int j=0; j<PAGESIZE; j++) {
+      object *obj = &PageBuffer[i][j];
+      if (marked(obj) && ((obj->type) & ~MARKBIT) == STRING) {
+        obj = cdr(obj);
+        while (obj != NULL) {
+          if (cdr(obj) == to) cdr(obj) = from;
+          obj = (object *)((uintptr_t)(car(obj)) & ~MARKBIT);
+        } 
+      } 
     }
   }
 }
   
 int compactimage (object **arg) {
-  markobject(tee);
+/*   markobject(tee);
   markobject(GlobalEnv);
   markobject(GCStack);
   object *firstfree = Workspace;
@@ -396,7 +516,7 @@ int compactimage (object **arg) {
     obj--;
   }
   sweep();
-  return firstfree - Workspace;
+  return firstfree - Workspace; */
 }
 
 // Make SD card filename
@@ -504,10 +624,12 @@ unsigned int saveimage (object *arg) {
   SpiffsWriteInt(file, (uintptr_t)SymbolTop);
   for (int i=0; i<SYMBOLTABLESIZE; i++) file.write(SymbolTable[i]);
   #endif
-  for (unsigned int i=0; i<imagesize; i++) {
-    object *obj = &Workspace[i];
-    SpiffsWriteInt(file, (uintptr_t)car(obj));
-    SpiffsWriteInt(file, (uintptr_t)cdr(obj));
+  for (int i=0; i<NUMPAGESRESIDENT; i++) {
+    for (int j=0; j<PAGESIZE; j++) {
+      object *obj = &PageBuffer[i][j];
+      SpiffsWriteInt(file, (uintptr_t)car(obj));
+      SpiffsWriteInt(file, (uintptr_t)cdr(obj));
+    }
   }
   file.close();
   return imagesize;
@@ -592,10 +714,12 @@ unsigned int loadimage (object *arg) {
   SymbolTop = (char *)SpiffsReadInt(file);
   for (int i=0; i<SYMBOLTABLESIZE; i++) SymbolTable[i] = file.read();
   #endif
-  for (int i=0; i<imagesize; i++) {
-    object *obj = &Workspace[i];
-    car(obj) = (object *)SpiffsReadInt(file);
-    cdr(obj) = (object *)SpiffsReadInt(file);
+  for (int i=0; i<NUMPAGESRESIDENT; i++) {
+    for (int j=0; j<PAGESIZE; j++) {
+      object *obj = &PageBuffer[i][j];
+      car(obj) = (object *)SpiffsReadInt(file);
+      cdr(obj) = (object *)SpiffsReadInt(file);
+    }
   }
   file.close();
   gc(NULL, NULL);
