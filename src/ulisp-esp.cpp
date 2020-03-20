@@ -119,20 +119,11 @@ typedef struct sobject {
   };
 
   // Reference operator
-  sobject* operator&() {
-    // If this > physical memory, then swap memory
-    return this;
-  }
-
+  sobject* operator&();
   // Deference operator
-  sobject& operator*() {
-    return *this;
-  }
-
-  // Access operator
-  sobject* operator->() { 
-    return this; 
-  }
+  sobject& operator*();
+  // Accss operator
+  sobject* operator->();
 } object;
 
 typedef object *(*fn_ptr_type)(object *, object *);
@@ -165,7 +156,7 @@ typedef int PinMode;
 #if defined(ESP8266)
   #define PSTR(s) s
   #define PROGMEM
-  #define WORKSPACESIZE 3072-SDSIZE       /* Cells (8*bytes) */
+  #define WORKSPACESIZE (3072-SDSIZE)      /* Cells (8*bytes) */
   #define EEPROMSIZE 4096                 /* Bytes available for EEPROM */
   #define SYMBOLTABLESIZE 512             /* Bytes */
   #define SDCARD_SS_PIN 10
@@ -173,7 +164,7 @@ typedef int PinMode;
   typedef int BitOrder;
 
 #elif defined(ESP32)
-  #define WORKSPACESIZE 8000-SDSIZE       /* Cells (8*bytes) */
+  #define WORKSPACESIZE (8000-SDSIZE)       /* Cells (8*bytes) */
   #define EEPROMSIZE 4096                 /* Bytes available for EEPROM */
   #define SYMBOLTABLESIZE 1024            /* Bytes */
   #define analogWrite(x,y) dacWrite((x),(y))
@@ -183,12 +174,14 @@ typedef int PinMode;
 
 #endif
 
-#define NUMPAGES 200
-#define NUMPAGESRESIDENT 100
+#define NUMPAGES 100
+#define NUMPAGESRESIDENT 50 /* 50 */
 #define PAGESIZE 64
 
-unsigned int Nursery = 0;
-unsigned int LFU = 1;
+int Nursery = 0;
+int LFU;
+boolean Initialized = false;
+
 page Pages[NUMPAGES];
 object PageBuffer[NUMPAGESRESIDENT][PAGESIZE] WORDALIGNED;
 
@@ -229,6 +222,7 @@ int builtin (char* n);
 void error (symbol_t fname, PGM_P string, object *symbol);
 void error2 (symbol_t fname, PGM_P string);
 
+void savepage (unsigned int pageid);
 inline int maxbuffer (char *buffer);
 char nthchar (object *string, int n);
 boolean listp (object *x);
@@ -255,6 +249,7 @@ void superprint (object *form, int lm, pfun_t pfun);
 void supersub (object *form, int lm, int super, pfun_t pfun);
 int subwidthlist (object *form, int w);
 int glibrary ();
+void loadpage (unsigned int from, unsigned int to);
 
 /* void mark(object *x) {
   object *obj = (object *)(((uintptr_t)(car(x))) | MARKBIT);
@@ -268,6 +263,63 @@ boolean marked(object *x) {
   boolean b = (((uintptr_t)(car(x))) & MARKBIT) != 0;
   return b;
 } */
+
+  // Convert virtual pointer to a physical address.   
+  sobject *convertPointer(sobject *vptr) {
+    if (!Initialized) {
+      return vptr;
+    }
+    int pageid = ((unsigned int)vptr - (unsigned int)PageBuffer) / PAGESIZE;
+    int offset = ((unsigned int)vptr - (unsigned int)PageBuffer) % PAGESIZE;
+    page *pg = &Pages[pageid];
+
+    // Update use count and sort the LFU list.
+    pg->useCount++;
+    int mfu = pg->mfuPageId;
+    while (pg->useCount > Pages[mfu].useCount && mfu != LFU) {
+      mfu = Pages[mfu].mfuPageId;
+    }
+    if (mfu != pg->mfuPageId) {
+      Pages[pg->lfuPageId].mfuPageId = pg->mfuPageId;
+      Pages[pg->mfuPageId].lfuPageId = pg->lfuPageId;
+      if (pageid == LFU) {
+        LFU = pg->mfuPageId;
+      }
+      pg->lfuPageId = Pages[mfu].lfuPageId;
+      pg->mfuPageId = mfu == pageid ? LFU : mfu;
+      Pages[pg->lfuPageId].mfuPageId = pageid;
+      Pages[pg->mfuPageId].lfuPageId = pageid;
+    }
+
+    // Swap-out the LFU physical page and swap-in this page.
+    if (pg->address == NULL) {
+      int swap = LFU;
+      while (Pages[swap].address == NULL) {
+        swap = Pages[swap].mfuPageId;
+      }
+      if ((Pages[swap].flags | DIRTY) != 0) {
+        savepage(swap);
+      }
+      loadpage(pageid, swap);
+    }
+
+    return (sobject *)(((unsigned int)pg->address) + offset);    
+ }
+
+  // Reference operator
+  sobject* sobject::operator&() {
+    return convertPointer(this);
+  }
+
+  // Deference operator
+  sobject& sobject::operator*() {
+    return *convertPointer(this);
+  }
+
+  // Access operator
+  sobject* sobject::operator->() { 
+    return convertPointer(this);
+  }
 
 // Set up workspace
 
@@ -288,8 +340,8 @@ void initworkspace () {
     pg->id = i;
     pg->offset = 0;
     pg->useCount = 0;
-    pg->mfuPageId = (i-1+NUMPAGES) % NUMPAGES;
-    pg->lfuPageId = (i+1) % NUMPAGES;
+    pg->lfuPageId = (i-1+NUMPAGES) % NUMPAGES;
+    pg->mfuPageId = (i+1) % NUMPAGES;
     pg->flags = 0;
     if (i < NUMPAGESRESIDENT) {
       pg->address = &PageBuffer[i];
@@ -298,22 +350,8 @@ void initworkspace () {
       pg->address = NULL;
     }
   }
-}
-
-void savepage (unsigned int pageid) {
-  page pg = Pages[pageid];
-  if (pg.flags & DIRTY == 0) return;
-  pg.flags = SWAPPED;
-  
-}
-
-void loadpage (unsigned int from, unsigned int to) {
-  if (Pages[from].flags & SWAPPED == 0) {
-    initpagebuffer(PageBuffer[to]);
-    Pages[from].address = &PageBuffer[to];
-    Pages[to].address = NULL;
-    return;
-  }
+  LFU = 0;
+  Initialized = true;
 }
 
 object *myalloc () {
@@ -554,6 +592,46 @@ void SpiffsWriteInt (File file, int data) {
 }
 #endif
 
+void savepage (unsigned int pageid) {
+  page pg = Pages[pageid];
+  if ((pg.flags & DIRTY) == 0) return;
+  pg.flags = SWAPPED;
+#if defined(sdcardsupport)
+  SD.begin(SDCARD_SS_PIN);
+  char filename[13];
+  sprintf(filename, "/ULISP%03d.SWP", pageid);
+  File file = SD.open(filename, FILE_WRITE);
+  else error(SAVEIMAGE, PSTR("illegal argument"), arg);
+  if (!file) error2(SAVEIMAGE, PSTR("problem saving to SD card"));
+  for (unsigned int i=0; i<imagesize; i++) {
+    object *obj = &Workspace[i];
+    SDWriteInt(file, (uintptr_t)car(obj));
+    SDWriteInt(file, (uintptr_t)cdr(obj));
+  }
+  file.close();
+#elif defined(eepromsupport)
+  EEPROM.begin(EEPROMSIZE);
+  for (unsigned int i=0; i<PAGESIZE; i++) {
+    object *obj = &Workspace[i];
+    EpromWriteInt(&addr, (uintptr_t)car(obj));
+    EpromWriteInt(&addr, (uintptr_t)cdr(obj));
+  }
+  EEPROM.commit();
+#else
+  SPIFFS.begin();
+  char filename[13];
+  sprintf(filename, "/ULISP%03d.SWP", pageid);  
+  File file = SPIFFS.open(filename, "w");
+  if (!file) error2(SAVEIMAGE, PSTR("problem saving to SPIFFS"));
+  for (int i=0; i<PAGESIZE; i++) {
+    object *obj = &PageBuffer[pageid][i];
+    SpiffsWriteInt(file, (uintptr_t)car(obj));
+    SpiffsWriteInt(file, (uintptr_t)cdr(obj));
+  }
+  file.close();
+#endif
+}
+
 unsigned int saveimage (object *arg) {
   unsigned int imagesize = compactimage(&arg);
 #if defined(sdcardsupport)
@@ -655,6 +733,45 @@ int SpiffsReadInt (File file) {
   return b0 | b1<<8 | b2<<16 | b3<<24;
 }
 #endif
+
+// Load page from storage to page address to.
+void loadpage (unsigned int from, unsigned int to) {
+  Pages[to].address = Pages[from].address;
+  Pages[from].address = NULL;
+  initpagebuffer(PageBuffer[to]);
+  if ((Pages[from].flags & SWAPPED) != 0) return;
+  object *obj = (object *)&Pages[to].address;
+#if defined(sdcardsupport)
+  SD.begin(SDCARD_SS_PIN);
+  char filename[13];
+  sprintf(filename, "/ULISP%03d.SWP", from);  
+  File file = SPIFFS.open(filename, "w");
+  for (int i=0; i<PAGESIZE; i++) {
+    car(obj) = (object *)SDReadInt(file);
+    cdr(obj) = (object *)SDReadInt(file);
+    obj += sizeof(object);
+  }
+  file.close();
+#elif defined(eepromsupport)
+  EEPROM.begin(EEPROMSIZE);
+  for (int i=0; i<PAGESIZE; i++) {
+    car(obj) = (object *)EpromReadInt(&addr);
+    cdr(obj) = (object *)EpromReadInt(&addr);
+    obj += sizeof(object);
+  }
+#else
+  SPIFFS.begin();
+  char filename[13];
+  sprintf(filename, "/ULISP%03d.SWP", from);  
+  File file = SPIFFS.open(filename, "w");
+  for (int i=0; i<PAGESIZE; i++) {
+    car(obj) = (object *)SpiffsReadInt(file);
+    cdr(obj) = (object *)SpiffsReadInt(file);
+    obj += sizeof(object);
+  }
+  file.close();
+#endif
+}
 
 unsigned int loadimage (object *arg) {
 #if defined(sdcardsupport)
