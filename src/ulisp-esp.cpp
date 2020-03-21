@@ -37,7 +37,7 @@
 
 #if defined(sdcardsupport)
   #include <SD.h>
-  #define SDSIZE 172
+  #define SDSIZE 6
 #else
   #define SDSIZE 0
 #endif
@@ -63,9 +63,9 @@
 #define characterp(x)      ((x) != NULL && (x)->type == CHARACTER)
 #define streamp(x)         ((x) != NULL && (x)->type == STREAM)
 
-#define mark(x)            (car(x) = (object *)(((uintptr_t)(car(x))) | MARKBIT))
-#define unmark(x)          (car(x) = (object *)(((uintptr_t)(car(x))) & ~MARKBIT))
-#define marked(x)          ((((uintptr_t)(car(x))) & MARKBIT) != 0)
+//#define mark(x)            (car(x) = (object *)(((uintptr_t)(car(x))) | MARKBIT))
+//#define unmark(x)          (car(x) = (object *)(((uintptr_t)(car(x))) & ~MARKBIT))
+//#define marked(x)          ((((uintptr_t)(car(x))) & MARKBIT) != 0)
 #define MARKBIT            1
 
 #define DIRTY              1
@@ -119,18 +119,18 @@ typedef struct sobject {
   };
 
   // Reference operator
-  sobject* operator&();
+  sobject* operator &();
   // Deference operator
-  sobject& operator*();
-  // Accss operator
-  sobject* operator->();
+  sobject& operator *();
+  // Deference member operator
+  sobject* operator ->();
 } object;
 
 typedef object *(*fn_ptr_type)(object *, object *);
 
 typedef struct {
   int id;
-  void* address;  // Physical address
+  void *addr;     // Physical address
   int offset;     // First free byte in page;
   int useCount;
   int mfuPageId;
@@ -156,7 +156,7 @@ typedef int PinMode;
 #if defined(ESP8266)
   #define PSTR(s) s
   #define PROGMEM
-  #define WORKSPACESIZE (3072-SDSIZE)      /* Cells (8*bytes) */
+  #define NUMPAGESRESIDENT (24-SDSIZE)
   #define EEPROMSIZE 4096                 /* Bytes available for EEPROM */
   #define SYMBOLTABLESIZE 512             /* Bytes */
   #define SDCARD_SS_PIN 10
@@ -164,7 +164,7 @@ typedef int PinMode;
   typedef int BitOrder;
 
 #elif defined(ESP32)
-  #define WORKSPACESIZE (8000-SDSIZE)       /* Cells (8*bytes) */
+  #define NUMPAGESRESIDENT 20 /* (62-SDSIZE) */
   #define EEPROMSIZE 4096                 /* Bytes available for EEPROM */
   #define SYMBOLTABLESIZE 1024            /* Bytes */
   #define analogWrite(x,y) dacWrite((x),(y))
@@ -174,13 +174,14 @@ typedef int PinMode;
 
 #endif
 
-#define NUMPAGES 100
-#define NUMPAGESRESIDENT 50 /* 50 */
+#define NUMPAGES 150
 #define PAGESIZE 64
+#define PAGESHIFT 10 /* 2^PAGESHIFT = PAGESIZE*sizeod(object) */
 
 int Nursery = 0;
 int LFU;
-boolean Initialized = false;
+bool Initialized = false;
+bool Collect = false;
 
 page Pages[NUMPAGES];
 object PageBuffer[NUMPAGESRESIDENT][PAGESIZE] WORDALIGNED;
@@ -191,7 +192,6 @@ char SymbolTable[SYMBOLTABLESIZE];
 
 jmp_buf exception;
 unsigned int Freespace = 0;
-object *Freelist;
 char *SymbolTop = SymbolTable;
 unsigned int I2CCount;
 unsigned int TraceFn[TRACEMAX];
@@ -251,7 +251,7 @@ int subwidthlist (object *form, int w);
 int glibrary ();
 void loadpage (unsigned int from, unsigned int to);
 
-/* void mark(object *x) {
+void mark(object *x) {
   object *obj = (object *)(((uintptr_t)(car(x))) | MARKBIT);
   car(x) = obj;
 }
@@ -262,75 +262,84 @@ void unmark(object *x) {
 boolean marked(object *x) {
   boolean b = (((uintptr_t)(car(x))) & MARKBIT) != 0;
   return b;
-} */
+} 
 
-  // Convert virtual pointer to a physical address.   
-  sobject *convertPointer(sobject *vptr) {
-    if (!Initialized) {
-      return vptr;
+void swappage(int pageid) {
+  int swap = LFU;
+  while (Pages[swap].addr == NULL) {
+    swap = Pages[swap].mfuPageId;
+  }
+  savepage(swap);
+  loadpage(pageid, swap);
+}
+
+// Convert virtual pointer to a physical address.   
+object *convert2addr(sobject *vptr) {
+  if (!Initialized) {
+    return vptr;
+  }
+  int pageid = ((unsigned long)vptr - (unsigned int)PageBuffer)>>PAGESHIFT;
+  int byteoffset = ((unsigned long)vptr - (unsigned int)PageBuffer) % (PAGESIZE*sizeof(object));
+  page *pg = &Pages[pageid];
+
+  // Update use count and sort the LFU list.
+  pg->useCount++;
+  int mfu = pg->mfuPageId;
+  while (pg->useCount > Pages[mfu].useCount && mfu != LFU) {
+    mfu = Pages[mfu].mfuPageId;
+  }
+  if (mfu != pg->mfuPageId) {
+    Pages[pg->lfuPageId].mfuPageId = pg->mfuPageId;
+    Pages[pg->mfuPageId].lfuPageId = pg->lfuPageId;
+    if (pageid == LFU) {
+      LFU = pg->mfuPageId;
     }
-    int pageid = ((unsigned int)vptr - (unsigned int)PageBuffer) / PAGESIZE;
-    int offset = ((unsigned int)vptr - (unsigned int)PageBuffer) % PAGESIZE;
-    page *pg = &Pages[pageid];
-
-    // Update use count and sort the LFU list.
-    pg->useCount++;
-    int mfu = pg->mfuPageId;
-    while (pg->useCount > Pages[mfu].useCount && mfu != LFU) {
-      mfu = Pages[mfu].mfuPageId;
-    }
-    if (mfu != pg->mfuPageId) {
-      Pages[pg->lfuPageId].mfuPageId = pg->mfuPageId;
-      Pages[pg->mfuPageId].lfuPageId = pg->lfuPageId;
-      if (pageid == LFU) {
-        LFU = pg->mfuPageId;
-      }
-      pg->lfuPageId = Pages[mfu].lfuPageId;
-      pg->mfuPageId = mfu == pageid ? LFU : mfu;
-      Pages[pg->lfuPageId].mfuPageId = pageid;
-      Pages[pg->mfuPageId].lfuPageId = pageid;
-    }
-
-    // Swap-out the LFU physical page and swap-in this page.
-    if (pg->address == NULL) {
-      int swap = LFU;
-      while (Pages[swap].address == NULL) {
-        swap = Pages[swap].mfuPageId;
-      }
-      if ((Pages[swap].flags | DIRTY) != 0) {
-        savepage(swap);
-      }
-      loadpage(pageid, swap);
-    }
-
-    return (sobject *)(((unsigned int)pg->address) + offset);    
- }
-
-  // Reference operator
-  sobject* sobject::operator&() {
-    return convertPointer(this);
+    pg->lfuPageId = Pages[mfu].lfuPageId;
+    pg->mfuPageId = mfu == pageid ? LFU : mfu;
+    Pages[pg->lfuPageId].mfuPageId = pageid;
+    Pages[pg->mfuPageId].lfuPageId = pageid;
   }
 
-  // Deference operator
-  sobject& sobject::operator*() {
-    return *convertPointer(this);
+  // Swap-out the LFU physical page and swap-in this page.
+  if (pg->addr == NULL) {
+    swappage(pageid);
   }
 
-  // Access operator
-  sobject* sobject::operator->() { 
-    return convertPointer(this);
+  return (object *)((unsigned int)pg->addr + byteoffset);    
+}
+
+// Convert physical address to virtual pointer.
+object *convert2vptr(object *addr) {
+  if (!Initialized) {
+    return addr;
+  }
+  int i = Pages[LFU].lfuPageId;  // MFU
+  while (((unsigned int)addr < (unsigned int)Pages[i].addr) || 
+         ((unsigned int)addr > (unsigned int)Pages[i].addr + (PAGESIZE*sizeof(object)))) {
+    i = Pages[i].lfuPageId;
+  }
+  return (object *)((unsigned long)PageBuffer + (i<<PAGESHIFT) + ((unsigned int)addr % (PAGESIZE*sizeof(object))));
+}
+
+// Reference operator
+sobject* sobject::operator &() {  
+  return convert2addr(this); 
+}
+
+// Dereference operator
+sobject& sobject::operator *() { 
+  return *convert2vptr(this); 
+}
+
+// Deference member operator
+sobject* sobject::operator ->() { 
+  return convert2addr(this); 
   }
 
 // Set up workspace
 
-void initpagebuffer (object buffer[]) {
-  object *prev = NULL;
-  for (int i=PAGESIZE-1; i>=0; i--) {
-    object *obj = &buffer[i];
-    car(obj) = NULL;
-    cdr(obj) = prev;
-    prev = obj;
-  }
+void initpagebuffer (void *buffer) {
+  memset(buffer, 0, PAGESIZE*sizeof(object));
 }
 
 void initworkspace () {
@@ -343,13 +352,9 @@ void initworkspace () {
     pg->lfuPageId = (i-1+NUMPAGES) % NUMPAGES;
     pg->mfuPageId = (i+1) % NUMPAGES;
     pg->flags = 0;
-    if (i < NUMPAGESRESIDENT) {
-      pg->address = &PageBuffer[i];
-      initpagebuffer((object *)pg->address);
-    } else {
-      pg->address = NULL;
-    }
+    pg->addr = (i < NUMPAGESRESIDENT) ? (void *)&PageBuffer[i] : NULL;
   }
+  memset(PageBuffer, 0, sizeof(PageBuffer));
   LFU = 0;
   Initialized = true;
 }
@@ -358,42 +363,42 @@ object *myalloc () {
   // Try to allocate in nursery. 
   page *nursery = &Pages[Nursery];
   Freespace--;
+  object *vptr = (object *)((unsigned long)PageBuffer[Nursery] + nursery->offset*sizeof(object));
+
+  // Find next free object.
   int offset = (nursery->offset+1) % PAGESIZE;
-  object *obj = &PageBuffer[Nursery][offset];
-  while (offset != nursery->offset && obj->car != NULL) {
+  unsigned long *free = (unsigned long *)((unsigned long)PageBuffer[Nursery] + offset*sizeof(object));
+  while (*free != (unsigned long)NULL && offset != nursery->offset) {
     offset = (offset+1) % PAGESIZE;
-    obj = &PageBuffer[Nursery][offset];
+    free = (unsigned long *)((unsigned long)PageBuffer[Nursery] + offset*sizeof(object));
   }
-  if (offset != nursery->offset) {
-    nursery->offset = offset;
-    nursery->flags |= DIRTY;
-    return &PageBuffer[Nursery][offset];
-  }
-
-  // Move nursery to resident LFU page with space available.
-  nursery->offset = PAGESIZE;
-  while (nursery->offset == PAGESIZE && nursery->address != NULL) {
-    Nursery = nursery->lfuPageId;
+  if (offset == nursery->offset) {
+    // Move nursery to next resident MFU page with space available.
+    nursery->offset = PAGESIZE;
+    Nursery = nursery->mfuPageId;
     nursery = &Pages[Nursery];
-  }
-  if (nursery->address != NULL) {
-    if (nursery->offset == PAGESIZE) error2(0, PSTR("no room"));
-    offset = nursery->offset;
-    nursery->offset = (offset+1) % PAGESIZE;
-    nursery->flags |= DIRTY;
-    return &PageBuffer[Nursery][offset];
-  }
+    while (nursery->offset == PAGESIZE && nursery->addr != NULL) {
+      Nursery = nursery->mfuPageId;
+      nursery = &Pages[Nursery];
+    }
 
-  // Save page if dirty.
-  if ((nursery->flags & DIRTY) > 0) {
-    savepage(nursery->id);
+    // No more physical pages for the nursery.
+    if (nursery->addr == NULL) {
+      if (nursery->offset == PAGESIZE) error2(0, PSTR("no room"));
+      swappage(Nursery);
+    }
+
+    Collect = true;
+  } else {
+    nursery->offset = offset;
   }
+  nursery->flags |= DIRTY;
+
+  return vptr;
 }
 
 inline void myfree (object *obj) {
   car(obj) = NULL;
-  cdr(obj) = Freelist;
-  Freelist = obj;
   Freespace++;
 }
 
@@ -478,7 +483,6 @@ void markobject (object *obj) {
 }
 
 void sweep () {
-  Freelist = NULL;
   Freespace = 0;
   for (int i=0; i<NUMPAGESRESIDENT; i++) {
     for (int j=0; j<PAGESIZE; j++) {
@@ -489,6 +493,7 @@ void sweep () {
 }
 
 void gc (object *form, object *env) {
+  if (!Collect) return;
   #if defined(printgcs)
   int start = Freespace; 
   #endif
@@ -498,6 +503,7 @@ void gc (object *form, object *env) {
   markobject(form);
   markobject(env);
   sweep();
+  Collect = false;
   #if defined(printgcs)
   pfl(pserial); pserial('{'); pint(Freespace - start, pserial); pserial('}');
   #endif
@@ -736,11 +742,14 @@ int SpiffsReadInt (File file) {
 
 // Load page from storage to page address to.
 void loadpage (unsigned int from, unsigned int to) {
-  Pages[to].address = Pages[from].address;
-  Pages[from].address = NULL;
+  Pages[to].addr = Pages[from].addr;
+  Pages[from].addr = NULL;
   initpagebuffer(PageBuffer[to]);
-  if ((Pages[from].flags & SWAPPED) != 0) return;
-  object *obj = (object *)&Pages[to].address;
+  if ((Pages[from].flags & SWAPPED) != 0) {
+    initpagebuffer(PageBuffer[to]);
+    return;
+  }
+  object *obj = (object *)&Pages[to].addr;
 #if defined(sdcardsupport)
   SD.begin(SDCARD_SS_PIN);
   char filename[13];
@@ -4072,7 +4081,7 @@ object *eval (object *form, object *env) {
   yield(); // Needed on ESP8266 to avoid Soft WDT Reset
   // Enough space?
   if (End != 0xA5) error2(0, PSTR("Stack overflow"));
-  if (Freespace <= WORKSPACESIZE>>4) gc(form, env);
+  if (Collect) gc(form, env);
   // Escape
   if (tstflag(ESCAPE)) { clrflag(ESCAPE); error2(0, PSTR("Escape!"));}
   #if defined (serialmonitor)

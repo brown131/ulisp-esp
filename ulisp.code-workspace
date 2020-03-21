@@ -4,5 +4,12 @@
 			"path": "."
 		}
 	],
-	"settings": {}
+	"settings": {
+		"files.associations": {
+			"functional": "cpp",
+			"new": "cpp",
+			"streambuf": "cpp",
+			"typeinfo": "cpp"
+		}
+	}
 }
